@@ -1,0 +1,1843 @@
+package deploy
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"log/slog"
+	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	pluginpkg "github.com/pdai/pdai/internal/plugin"
+	"gorm.io/gorm"
+)
+
+// previewJob tracks an in-flight runPreview goroutine so a second webhook
+// (`synchronize` on top of an in-progress build) can cancel the first
+// instead of racing it, and `DeletePreview` + plugin `Stop` can wait for
+// the goroutine to actually drain before declaring the row safe to remove.
+type previewJob struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+// PreviewService manages ephemeral preview deployments from GitHub PRs.
+//
+// Concurrency model (Codex Round-5 C1/C2/H6 fixes):
+//   - `jobs` tracks in-flight runPreview goroutines by preview ID.
+//     CreatePreview cancels any existing job for the same ID before
+//     spawning a new one (webhook deduplication).
+//   - `wg` tracks all runPreview goroutines so plugin Stop can wait
+//     for drain.
+//   - `rootCtx` is the service-level context; cancelling it signals
+//     every runPreview goroutine to abort at its next ctx check. Set
+//     up in NewPreviewService and cancelled in Stop().
+//   - The (project_id, pr_number) unique index on PreviewDeployment
+//     prevents duplicate rows at the DB layer even if two webhooks
+//     race past the lookup-then-create path in application code.
+//
+// previewKey identifies a single PR's lock entry in previewLocks.
+// Same struct also defines the natural identity of a preview from
+// the webhook side (project + PR number).
+type previewKey struct {
+	ProjectID uint
+	PRNumber  int
+}
+
+type PreviewService struct {
+	db      *gorm.DB
+	svc     *Service
+	coreAPI pluginpkg.CoreAPI
+	logger  *slog.Logger
+
+	rootCtx    context.Context
+	rootCancel context.CancelFunc
+	jobsMu     sync.Mutex
+	jobs       map[uint]*previewJob
+	wg         sync.WaitGroup
+	// previewLocks holds a *sync.Mutex per (project_id, pr_number).
+	// Replaces the v0.14 global createMu (R11-M1 v0.16 fix): two
+	// webhooks for DIFFERENT previews now run in parallel, only
+	// same-PR Create/Delete serialize. Lock is created lazily via
+	// LoadOrStore on first access; evicted in DeletePreview after
+	// the row is successfully deleted (per-PR lifecycle ends, no
+	// more webhooks expected for this PR number).
+	previewLocks sync.Map // map[previewKey]*sync.Mutex
+}
+
+// NewPreviewService creates a new PreviewService.
+func NewPreviewService(db *gorm.DB, svc *Service, coreAPI pluginpkg.CoreAPI, logger *slog.Logger) *PreviewService {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &PreviewService{
+		db:         db,
+		svc:        svc,
+		coreAPI:    coreAPI,
+		logger:     logger,
+		rootCtx:    ctx,
+		rootCancel: cancel,
+		jobs:       make(map[uint]*previewJob),
+	}
+}
+
+// previewLock returns the (lazily-created) per-PR lock. Goroutines
+// for different (project, PR) pairs get different locks and run in
+// parallel; same-key callers serialize. Combined with the row-level
+// generation token (R9), this is the full Create/Delete coordination
+// primitive.
+func (ps *PreviewService) previewLock(projectID uint, prNumber int) *sync.Mutex {
+	key := previewKey{ProjectID: projectID, PRNumber: prNumber}
+	actual, _ := ps.previewLocks.LoadOrStore(key, &sync.Mutex{})
+	return actual.(*sync.Mutex)
+}
+
+// evictPreviewLock removes the per-PR lock entry. Called by
+// DeletePreview after the row is successfully deleted — the PR is
+// terminal and no more webhooks are expected for this number. The
+// concurrent-create race window (a brand-new CreatePreview for the
+// same PR number arriving between our Lock and our evict) is closed
+// by the v0.14 generation-token + DB unique-index path:
+// CreatePreview either gets a fresh lock (we already evicted) or
+// our lock (we haven't yet); both paths converge on a clean state.
+func (ps *PreviewService) evictPreviewLock(projectID uint, prNumber int) {
+	ps.previewLocks.Delete(previewKey{ProjectID: projectID, PRNumber: prNumber})
+}
+
+// Stop cancels every in-flight runPreview goroutine and waits for them to
+// drain. Called from plugin Stop() so a panel shutdown doesn't leave zombie
+// `git clone` or `podman build` children running past SIGTERM.
+func (ps *PreviewService) Stop(drainTimeout time.Duration) {
+	ps.rootCancel()
+	// Wait up to drainTimeout for all goroutines. If they outrun the
+	// timeout, exec.CommandContext still kills their subprocesses via
+	// the cancel signal — we just return before they finish logging.
+	done := make(chan struct{})
+	go func() { ps.wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(drainTimeout):
+		ps.logger.Warn("preview jobs did not drain within timeout", "timeout", drainTimeout)
+	}
+}
+
+// CreatePreview creates (or re-triggers) a preview deployment for a GitHub PR.
+//
+// The full pipeline is:
+//  1. Preflight — preview feature enabled + wildcard domain configured
+//  2. Record — upsert a PreviewDeployment row (unique by project_id + pr_number)
+//  3. Build — clone the PR branch into a dedicated source dir + build an image
+//  4. Run — start the container on an allocated port (persisted on the row)
+//  5. Expose — create/update a Caddy reverse-proxy host
+//
+// Concurrency: if a runPreview goroutine is already in-flight for this PR
+// (fast double `synchronize` webhook is common on force-push), its context
+// is cancelled before we spawn the new one. Only one runPreview for a
+// given preview ID is ever running.
+//
+// Runs asynchronously: DB row is returned with status="pending" and a
+// goroutine performs steps 3–5.
+// CreatePreview is the same-repo PR convenience wrapper around
+// CreatePreviewWithFork. Preserves the v0.14 signature for callers
+// that don't care about fork-PR fields.
+func (ps *PreviewService) CreatePreview(projectID uint, prNumber int, branch string) (*PreviewDeployment, error) {
+	return ps.CreatePreviewWithFork(projectID, prNumber, branch, "", false, "", "")
+}
+
+// CreatePreviewWithFork (v0.19+) — extended CreatePreview that records
+// fork-PR provenance. When isForkPR is true, the build uses
+// headCloneURL (the fork's repo) instead of project.GitURL, and the
+// preview's Caddy host is NOT created until an admin approves via
+// POST /previews/:id/approve. Same-repo PRs (isForkPR=false) behave
+// identically to v0.18 — no approval gate.
+//
+// headSHA: the commit SHA the build was triggered for (from
+// payload.pull_request.head.sha). Used to revoke approval on
+// force-push (v019-R4-H3): when a new synchronize webhook arrives
+// with a different SHA, upsertPreviewRow resets Approved to false
+// if it was approved for an older SHA.
+func (ps *PreviewService) CreatePreviewWithFork(projectID uint, prNumber int, branch, headSHA string, isForkPR bool, headRepo, headCloneURL string) (*PreviewDeployment, error) {
+	if prNumber <= 0 {
+		return nil, fmt.Errorf("pr_number must be positive (got %d)", prNumber)
+	}
+
+	project, err := ps.svc.GetProject(projectID)
+	if err != nil {
+		return nil, fmt.Errorf("project not found: %w", err)
+	}
+	if !project.PreviewEnabled {
+		return nil, fmt.Errorf("preview deployments are not enabled for this project")
+	}
+	if project.DeployMode != "docker" {
+		return nil, fmt.Errorf("preview deployments require Docker deploy mode; project is in %q mode", project.DeployMode)
+	}
+	domain, err := ps.coreAPI.GetSetting("wildcard_domain")
+	if err != nil || domain == "" {
+		return nil, fmt.Errorf("wildcard_domain not configured — set it before enabling preview deploys")
+	}
+
+	expiry := project.PreviewExpiry
+	if expiry <= 0 {
+		expiry = 7
+	}
+	newExpiry := time.Now().AddDate(0, 0, expiry)
+
+	// R7-H1 + R8-H1 fix: serialize the lookup-create-allocate sequence
+	// AND the job-swap so two concurrent webhooks for the same preview
+	// cannot both observe "no job running" and both spawn racing
+	// runPreview goroutines. The per-PR lock (R11-M1 v0.16 fix) only
+	// blocks SAME-PR concurrency — different PRs run in parallel.
+	// The slow 30s drain of the previous job happens OUTSIDE the lock
+	// so other PRs (or even an admin Delete on a different preview)
+	// aren't blocked.
+	mu := ps.previewLock(projectID, prNumber)
+	mu.Lock()
+	preview, created, revokedHostID, err := ps.upsertPreviewRow(project, prNumber, branch, headSHA, newExpiry, domain, isForkPR, headRepo, headCloneURL)
+	if err != nil {
+		mu.Unlock()
+		return nil, err
+	}
+
+	// v019-R4-H1 fix (Option A — Vercel approval-before-build): for
+	// fork PRs that aren't yet approved for the current head SHA, do
+	// NOT spawn the build goroutine. The fork's code stays unread and
+	// unrun until admin clicks Approve. Status moves to
+	// "awaiting_approval" so the UI surfaces the gate clearly.
+	//
+	// Force-push case: upsertPreviewRow's rebuild path resets Approved
+	// when head.sha changes (R4-H3). So even a previously-approved
+	// fork bounces back here for re-approval after a force-push.
+	needsApproval := isForkPR && !preview.Approved
+	if needsApproval {
+		// v019-R5-M1: write status=awaiting_approval BEFORE
+		// releasing the per-PR lock so ApprovePreview can't see
+		// the transient status=pending.
+		ps.db.Model(&PreviewDeployment{}).
+			Where("id = ? AND generation = ?", preview.ID, preview.Generation).
+			Update("status", "awaiting_approval")
+		preview.Status = "awaiting_approval"
+
+		// v019-R9-M1 + R9-M2: tear down the revoked host UNDER the
+		// per-PR lock, BEFORE the drain. Strict gate: URL must stop
+		// resolving the moment we transition to awaiting_approval —
+		// not after a 30s drain. Caddy reload is bounded (~1-3s);
+		// holding the lock through it blocks ApprovePreview /
+		// RevokePreview / next CreatePreview for this PR briefly,
+		// other PRs unaffected.
+		//
+		// Only clear DB host_id on DeleteHost SUCCESS — failure
+		// preserves the reference so admin can retry via revoke.
+		if revokedHostID > 0 {
+			if err := ps.coreAPI.DeleteHost(revokedHostID); err != nil {
+				ps.logger.Warn("force-push: DeleteHost failed; host_id retained for retry",
+					"preview_id", preview.ID, "host_id", revokedHostID, "err", err)
+			} else {
+				ps.db.Model(&PreviewDeployment{}).
+					Where("id = ? AND host_id = ?", preview.ID, revokedHostID).
+					Update("host_id", 0)
+				preview.HostID = 0
+				ps.logger.Info("force-push: tore down old approved host",
+					"preview_id", preview.ID, "host_id", revokedHostID)
+			}
+		}
+
+		// v019-R6-H1: drain the old job UNDER the lock too. Release
+		// after drain so spawnPreviewBuild (from a racing Approve)
+		// doesn't see the still-draining job.
+		ps.jobsMu.Lock()
+		oldJob := ps.jobs[preview.ID]
+		ps.jobsMu.Unlock()
+		if oldJob != nil {
+			oldJob.cancel()
+			select {
+			case <-oldJob.done:
+			case <-time.After(30 * time.Second):
+				ps.logger.Warn("previous preview job did not drain in 30s",
+					"preview_id", preview.ID)
+			}
+		}
+		mu.Unlock()
+		ps.logger.Info("fork PR preview awaiting approval (build deferred)",
+			"project", project.Name, "pr", prNumber, "head_repo", headRepo, "head_sha", headSHA)
+		return &preview, nil
+	}
+	// Non-awaiting path (same-repo OR already-approved fork no SHA change):
+	// revokedHostID should be 0 here since approval reset only fires for
+	// fork+SHA-change which routes to needsApproval=true above. Defensive
+	// log if it's not — indicates a logic bug above.
+	if revokedHostID > 0 {
+		ps.logger.Warn("revokedHostID set on non-awaiting path; should not happen",
+			"preview_id", preview.ID, "host_id", revokedHostID)
+	}
+
+	// Same-repo PR or already-approved fork (no SHA change): spawn the
+	// runPreview goroutine immediately.
+
+	// Atomically install a new job placeholder. Whoever installs gets
+	// the previous job back as oldJob and is responsible for cancelling
+	// + draining it. Two webhooks racing each see the other's job here
+	// and resolve deterministically.
+	jobCtx, jobCancel := context.WithCancel(ps.rootCtx)
+	newJob := &previewJob{cancel: jobCancel, done: make(chan struct{})}
+	ps.jobsMu.Lock()
+	oldJob := ps.jobs[preview.ID]
+	ps.jobs[preview.ID] = newJob
+	ps.jobsMu.Unlock()
+	mu.Unlock()
+
+	if created {
+		ps.logger.Info("created new preview", "project", project.Name, "pr", prNumber, "base_port", preview.BasePort)
+	} else {
+		ps.logger.Info("rebuilding existing preview", "project", project.Name, "pr", prNumber, "branch", branch)
+	}
+
+	// Cancel + drain the previous job outside the lock. If drain times
+	// out, the new job still proceeds — the conditional WHERE slot=...
+	// in runPreview's final Updates (R7-H2) prevents the stale finisher
+	// from clobbering our slot transition.
+	if oldJob != nil {
+		oldJob.cancel()
+		select {
+		case <-oldJob.done:
+		case <-time.After(30 * time.Second):
+			ps.logger.Warn("previous preview job did not drain in 30s; relying on conditional updates to fence stale writes",
+				"preview_id", preview.ID)
+		}
+	}
+
+	// v019-R11-H1: capture spawn-time gen + headSHA so runPreview
+	// uses these snapshots instead of re-reading from DB. A force-push
+	// webhook between spawn and the DB-read inside runPreview would
+	// otherwise let runPreview build the new (unapproved) SHA.
+	spawnGen := preview.Generation
+	spawnSHA := preview.HeadSHA
+	ps.wg.Add(1)
+	go func() {
+		defer ps.wg.Done()
+		defer close(newJob.done)
+		defer ps.clearJob(preview.ID, newJob)
+		ps.runPreview(jobCtx, preview.ID, project.ID, branch, spawnGen, spawnSHA)
+	}()
+
+	return &preview, nil
+}
+
+// upsertPreviewRow looks up an existing preview by (project_id,
+// pr_number) and either updates it (rebuild path) or creates a fresh
+// row with all derived fields populated atomically (no post-Create
+// backfill, so a partial-create cannot leave base_port=0). Caller must
+// hold the per-PR lock from previewLock(projectID, prNumber) so port
+// allocation is single-flight for this PR.
+//
+// Returns:
+//   - resolved preview row
+//   - `created` flag
+//   - `revokedHostID`: when force-push triggered an approval reset on
+//     a previously-live preview, this is the old HostID. Caller is
+//     responsible for DeleteHosting it (R8-M1: gate semantics demand
+//     the URL stops resolving as soon as the new commit's approval
+//     is pending).
+//   - error
+func (ps *PreviewService) upsertPreviewRow(project *Project, prNumber int, branch, headSHA string, expiry time.Time, wildcardDomain string, isForkPR bool, headRepo, headCloneURL string) (PreviewDeployment, bool, uint, error) {
+	var preview PreviewDeployment
+	err := ps.db.Where("project_id = ? AND pr_number = ?", project.ID, prNumber).First(&preview).Error
+	if err == nil {
+		// Rebuild path. Preserve BasePort + Slot so the running container
+		// keeps serving until runPreview swaps it out. Bump Generation
+		// (R9-H1) so any stale runPreview from the previous trigger
+		// fails its WHERE generation = snapshot writes.
+		// v019-R4-H3: approval persists across rebuilds ONLY if the
+		// head SHA hasn't changed. A force-push (or any new commit)
+		// must require fresh admin review — fork author could have
+		// approved-then-pushed-malicious-code otherwise. Compare
+		// against ApprovedHeadSHA (the SHA admin actually saw).
+		updates := map[string]interface{}{
+			"branch":         branch,
+			"status":         "pending",
+			"expires_at":     expiry,
+			"failure_reason": "",
+			"generation":     gorm.Expr("generation + 1"),
+			"is_fork_pr":     isForkPR,
+			"head_repo":      headRepo,
+			"head_clone_url": headCloneURL,
+			"head_sha":       headSHA,
+		}
+		approvalReset := false
+		// v019-R8-M1 + R9-M2: revokedHostID is the host the CALLER
+		// should DeleteHost (under lock). DB host_id is NOT cleared
+		// here — only after DeleteHost succeeds (caller's responsi-
+		// bility) so a failed DeleteHost retains the reference for
+		// retry instead of orphaning a Caddy host with no DB pointer.
+		var revokedHostID uint
+		if isForkPR && preview.Approved && headSHA != "" && preview.ApprovedHeadSHA != "" && headSHA != preview.ApprovedHeadSHA {
+			updates["approved"] = false
+			updates["approved_at"] = nil
+			updates["approved_by_user_id"] = 0
+			updates["approved_head_sha"] = ""
+			if preview.HostID > 0 {
+				revokedHostID = preview.HostID
+				// host_id NOT cleared here — see R9-M2 above.
+			}
+			approvalReset = true
+		}
+		oldSHA := preview.ApprovedHeadSHA // capture before zeroing for log
+		if uerr := ps.db.Model(&preview).Updates(updates).Error; uerr != nil {
+			return preview, false, 0, fmt.Errorf("update existing preview: %w", uerr)
+		}
+		preview.Branch = branch
+		preview.Status = "pending"
+		preview.Generation++
+		preview.IsForkPR = isForkPR
+		preview.HeadRepo = headRepo
+		preview.HeadCloneURL = headCloneURL
+		preview.HeadSHA = headSHA
+		if approvalReset {
+			preview.Approved = false
+			preview.ApprovedAt = nil
+			preview.ApprovedByUserID = 0
+			preview.ApprovedHeadSHA = ""
+			ps.logger.Info("fork PR approval reset on force-push",
+				"preview_id", preview.ID, "old_sha", oldSHA, "new_sha", headSHA,
+				"revoked_host_id", revokedHostID)
+		}
+		return preview, false, revokedHostID, nil
+	}
+	if err != gorm.ErrRecordNotFound {
+		return preview, false, 0, fmt.Errorf("lookup existing preview: %w", err)
+	}
+
+	// Fresh-create path. R8-M1 fix: wrap Create + allocate + backfill in
+	// a single DB transaction so a partial failure (process crash, DB
+	// error mid-sequence) cannot leave a half-baked row with base_port=0
+	// that would later confuse runPreview into binding port 0.
+	//
+	// allocateBasePort runs WITHIN the transaction so its Count read
+	// sees uncommitted siblings and the rollback on failure releases
+	// the port for retry.
+	preview = PreviewDeployment{
+		ProjectID:    project.ID,
+		PRNumber:     prNumber,
+		Branch:       branch,
+		Status:       "pending",
+		ExpiresAt:    expiry,
+		Slot:         -1,
+		Generation:   1, // first deploy is generation 1; rebuild path will bump.
+		IsForkPR:     isForkPR,
+		HeadRepo:     headRepo,
+		HeadCloneURL: headCloneURL,
+		HeadSHA:      headSHA,
+		// Approved stays false on create — admin must explicitly
+		// approve fork PRs. Same-repo PRs (isForkPR=false) skip the
+		// approval gate entirely in runPreview.
+	}
+	var raceFallback *PreviewDeployment
+	txErr := ps.db.Transaction(func(tx *gorm.DB) error {
+		if cerr := tx.Create(&preview).Error; cerr != nil {
+			// Unique-index conflict on (project_id, pr_number) — racing
+			// webhook beat us. Re-lookup OUTSIDE the failing tx and
+			// signal the caller to take the rebuild path.
+			var existing PreviewDeployment
+			if rerr := ps.db.Where("project_id = ? AND pr_number = ?", project.ID, prNumber).First(&existing).Error; rerr == nil {
+				raceFallback = &existing
+				return nil // commit empty tx; we'll process raceFallback after
+			}
+			return fmt.Errorf("create preview record: %w", cerr)
+		}
+		basePort, perr := ps.allocateBasePortTx(tx, preview.ID)
+		if perr != nil {
+			return fmt.Errorf("allocate port: %w", perr)
+		}
+		slug := sanitizeForDomain(project.Name)
+		previewDomain := fmt.Sprintf("pr-%d-%s-%d.%s", prNumber, slug, preview.ID, wildcardDomain)
+		// PB-R5-H2: enforce DNS limits on the FULL preview domain, not
+		// just the wildcard suffix the admin configured. RFC 1035: ≤253
+		// chars total, each label ≤63. Also bounded by our column
+		// width (size:255) but DNS comes first.
+		if !validPreviewDomain(previewDomain) {
+			return fmt.Errorf("preview domain %q exceeds DNS limits (≤253 total, ≤63 per label); shorten the wildcard_domain or project name", previewDomain)
+		}
+		imageTag := fmt.Sprintf("pdai-preview-%d", preview.ID)
+		if uerr := tx.Model(&preview).Updates(map[string]interface{}{
+			"domain":    previewDomain,
+			"image_tag": imageTag,
+			"base_port": basePort,
+		}).Error; uerr != nil {
+			return fmt.Errorf("backfill preview fields: %w", uerr)
+		}
+		preview.Domain = previewDomain
+		preview.ImageTag = imageTag
+		preview.BasePort = basePort
+		return nil
+	})
+	if txErr != nil {
+		return preview, false, 0, txErr
+	}
+
+	if raceFallback != nil {
+		ps.logger.Info("preview row created by concurrent webhook; updating",
+			"project", project.Name, "pr", prNumber)
+		// v019-R4-H3 + R8-M1: same approval-reset-on-SHA-change
+		// logic as the rebuild path above. Also tear down the
+		// host on reset (return revokedHostID for caller to delete).
+		updates := map[string]interface{}{
+			"branch":         branch,
+			"status":         "pending",
+			"expires_at":     expiry,
+			"failure_reason": "",
+			"generation":     gorm.Expr("generation + 1"),
+			"is_fork_pr":     isForkPR,
+			"head_repo":      headRepo,
+			"head_clone_url": headCloneURL,
+			"head_sha":       headSHA,
+		}
+		approvalReset := false
+		var revokedHostID uint // R9-M2: host_id NOT cleared in DB; caller does post-DeleteHost
+		if isForkPR && raceFallback.Approved && headSHA != "" && raceFallback.ApprovedHeadSHA != "" && headSHA != raceFallback.ApprovedHeadSHA {
+			updates["approved"] = false
+			updates["approved_at"] = nil
+			updates["approved_by_user_id"] = 0
+			updates["approved_head_sha"] = ""
+			if raceFallback.HostID > 0 {
+				revokedHostID = raceFallback.HostID
+			}
+			approvalReset = true
+		}
+		if uerr := ps.db.Model(raceFallback).Updates(updates).Error; uerr != nil {
+			return *raceFallback, false, 0, fmt.Errorf("update existing preview after race: %w", uerr)
+		}
+		raceFallback.Branch = branch
+		raceFallback.Status = "pending"
+		raceFallback.Generation++
+		raceFallback.IsForkPR = isForkPR
+		raceFallback.HeadRepo = headRepo
+		raceFallback.HeadCloneURL = headCloneURL
+		raceFallback.HeadSHA = headSHA
+		if approvalReset {
+			raceFallback.Approved = false
+			raceFallback.ApprovedAt = nil
+			raceFallback.ApprovedByUserID = 0
+			raceFallback.ApprovedHeadSHA = ""
+		}
+		return *raceFallback, false, revokedHostID, nil
+	}
+
+	return preview, true, 0, nil
+}
+
+// clearJob removes the job from the registry iff it still matches — so a
+// cancel+immediate-restart sequence doesn't drop the NEW job entry.
+func (ps *PreviewService) clearJob(previewID uint, job *previewJob) {
+	ps.jobsMu.Lock()
+	defer ps.jobsMu.Unlock()
+	if cur, ok := ps.jobs[previewID]; ok && cur == job {
+		delete(ps.jobs, previewID)
+	}
+}
+
+// allocateBasePortTx picks a slot-0 base port in [20000, 25000) that
+// isn't taken by another preview. Slot-1 port is always base+5000,
+// landing in [25000, 30000). Runs WITHIN the caller's DB transaction
+// so the Count read sees uncommitted siblings; combined with the
+// per-PR lock from previewLock() (R8-H1, R11-M1 v0.16) this guarantees
+// no two previews are allocated the same base port.
+//
+// Uses a deterministic starting point for spread without a central
+// atomic counter. Bounded at 5000 slots; ample for any realistic
+// preview workload.
+func (ps *PreviewService) allocateBasePortTx(tx *gorm.DB, previewID uint) (int, error) {
+	const base = 20000
+	const rng = 5000
+	start := base + int(previewID%uint(rng))
+	for i := 0; i < rng; i++ {
+		candidate := base + ((start - base + i) % rng)
+		var count int64
+		tx.Model(&PreviewDeployment{}).
+			Where("base_port = ? AND id != ?", candidate, previewID).
+			Count(&count)
+		if count == 0 {
+			return candidate, nil
+		}
+	}
+	return 0, fmt.Errorf("no free preview base port in [%d, %d)", base, base+rng)
+}
+
+// slotName returns the canonical container name for a given preview +
+// slot. Deterministic so DeletePreview can target both slots without
+// tracking the inactive one's state.
+func slotName(previewID uint, slot int) string {
+	return fmt.Sprintf("pdai-preview-%d-p%d", previewID, slot)
+}
+
+// runPreview executes the full build-run-expose pipeline asynchronously.
+// Called from a goroutine by CreatePreview so the webhook handler can ack
+// GitHub quickly. All status transitions + cleanup on failure happen here.
+//
+// On failure: marks status="failed", tears down any partial resources
+// (image / container / host) so a retry (PR `synchronize` event) can
+// start fresh. The preview DB row itself is NOT deleted on failure —
+// the UI uses it to surface the error to the admin.
+// runPreview executes the preview build pipeline. expectedGen and
+// expectedSHA are SNAPSHOT values captured by the spawning caller —
+// runPreview uses them as the authoritative source of truth instead
+// of re-reading from DB, which would race with a concurrent webhook
+// that bumped generation/head_sha between spawn and DB-read
+// (security review v0.19 R11-H1).
+//
+// expectedGen=0 → spawn-time gen unknown (legacy callers); falls
+// back to reading gen from DB. expectedSHA="" → fall back to
+// branch-HEAD clone.
+func (ps *PreviewService) runPreview(jobCtx context.Context, previewID, projectID uint, branch string, expectedGen int, expectedSHA string) {
+	// Per-job deadline on top of the service-wide root context. 15 min is
+	// generous for most projects but bounded so a stuck build doesn't hold
+	// the job slot forever.
+	ctx, cancel := context.WithTimeout(jobCtx, 15*time.Minute)
+	defer cancel()
+
+	var preview PreviewDeployment
+	if err := ps.db.First(&preview, previewID).Error; err != nil {
+		// Row was deleted while we were queued (DeletePreview cancelled
+		// but the goroutine raced past the cancel check). Exit clean.
+		ps.logger.Info("runPreview: preview row gone, exiting", "id", previewID)
+		return
+	}
+	// R11-H1: trust the spawn-time snapshot over the DB read. If a
+	// concurrent webhook bumped generation between our spawn and our
+	// First() read, the DB shows the new gen — but we should still
+	// build the OLD (approved-as-of-spawn) commit. Use expectedGen
+	// for fence checks and expectedSHA for the clone target. Cancel
+	// signal will stop us promptly anyway; this guarantee is for
+	// the window between bump and cancel propagation.
+	gen := expectedGen
+	if gen == 0 {
+		// Legacy caller / paranoia fallback.
+		gen = preview.Generation
+	} else if preview.Generation != gen {
+		// DB already moved on (force-push delivered between spawn and
+		// our DB-read). Cancellation is in flight; exit before any
+		// external resources are created.
+		ps.logger.Info("runPreview: generation advanced before first DB read; aborting",
+			"id", previewID, "spawn_gen", gen, "db_gen", preview.Generation)
+		return
+	}
+	// Pin HeadSHA to the spawn-time value. preview.HeadSHA from DB
+	// could be a NEWER (force-pushed, unapproved) SHA.
+	if expectedSHA != "" {
+		preview.HeadSHA = expectedSHA
+	}
+
+	project, err := ps.svc.GetProject(projectID)
+	if err != nil {
+		ps.markFailed(previewID, gen, fmt.Sprintf("project lookup: %v", err))
+		return
+	}
+	if !ps.setStatus(previewID, gen, "building", "") {
+		return // row deleted or generation advanced between First() and Update()
+	}
+
+	// Per-preview log file. `cat $data/logs/preview_<id>/build.log` today;
+	// streaming to the UI is a Phase B concern.
+	logDir := filepath.Join(ps.svc.dataDir, "logs", fmt.Sprintf("preview_%d", previewID))
+	_ = os.MkdirAll(logDir, 0755)
+	logWriter, logErr := NewLogWriter(filepath.Join(logDir, "build.log"))
+	if logErr != nil {
+		ps.logger.Warn("preview log writer failed; proceeding without file log", "err", logErr)
+	}
+
+	srcDir := filepath.Join(ps.svc.dataDir, "preview-sources", fmt.Sprintf("preview_%d", previewID))
+	if err := os.MkdirAll(filepath.Dir(srcDir), 0755); err != nil {
+		ps.markFailed(previewID, gen, fmt.Sprintf("mkdir parent: %v", err))
+		return
+	}
+
+	// Resolve credentials via the main build path (handles SSH / GitHub
+	// App / GitHub OAuth / plain HTTPS).
+	authMethod, deployKey, httpsToken, err := ps.svc.GetGitCredentials(project)
+	if err != nil {
+		ps.markFailed(previewID, gen, fmt.Sprintf("git credentials: %v", err))
+		return
+	}
+	// R7-H3 fix: when auth_method is github_app/github_oauth, the project
+	// URL is typically SSH (`git@github.com:owner/repo`) but the token
+	// path needs HTTPS. Convert to a clean HTTPS URL (no embedded
+	// credentials) and let CloneToDir push the token via env var.
+	// R8-M2: surface conversion errors instead of silently falling back
+	// to the SSH URL (which would clone-fail without a deploy key).
+	cloneURL := project.GitURL
+	// v0.19: fork PR clones come from the FORK's clone_url, not the
+	// project's base GitURL — head.ref only exists in the fork's repo.
+	if preview.IsForkPR && preview.HeadCloneURL != "" {
+		cloneURL = preview.HeadCloneURL
+	}
+	if (authMethod == "github_app" || authMethod == "github_oauth") && httpsToken != "" {
+		converted, cerr := ConvertSSHToCleanHTTPS(cloneURL)
+		if cerr != nil {
+			ps.markFailed(previewID, gen, fmt.Sprintf("convert git URL to HTTPS for token auth: %v", cerr))
+			return
+		}
+		cloneURL = converted
+		deployKey = "" // SSH key not needed on the HTTPS path
+	}
+	// v019-R10-H1 fix: when we know the exact head SHA from the
+	// webhook, fetch THAT commit specifically — not whatever the
+	// branch HEAD is at clone-execution time. Without this, a fork
+	// author who force-pushes between admin approval and our git
+	// clone gets their new (potentially malicious) code into the
+	// build despite the approval gate. CloneAtSHA uses
+	// `git fetch --depth 1 <url> <sha>` + `git checkout FETCH_HEAD`
+	// + `git rev-parse HEAD` verification, so the only commit that
+	// can run is the one the webhook payload identified.
+	//
+	// Falls back to branch-HEAD CloneToDir when HeadSHA is empty
+	// (legacy rows from before v0.19; no webhook-provided SHA).
+	if preview.HeadSHA != "" {
+		if err := ps.svc.git.CloneAtSHA(ctx, cloneURL, preview.HeadSHA, deployKey, httpsToken, srcDir, logWriter); err != nil {
+			ps.markFailed(previewID, gen, fmt.Sprintf("git clone @ %s: %v", preview.HeadSHA, err))
+			return
+		}
+	} else {
+		if err := ps.svc.git.CloneToDir(ctx, cloneURL, branch, deployKey, httpsToken, srcDir, logWriter); err != nil {
+			ps.markFailed(previewID, gen, fmt.Sprintf("git clone: %v", err))
+			return
+		}
+	}
+	if ctx.Err() != nil {
+		return // cancelled mid-pipeline
+	}
+
+	imageTag := preview.ImageTag
+	if err := ps.svc.docker.BuildImageWithTag(ctx, srcDir, imageTag, logWriter, project.BuildType); err != nil {
+		ps.markFailed(previewID, gen, fmt.Sprintf("build: %v", err))
+		return
+	}
+	if ctx.Err() != nil {
+		return
+	}
+
+	// Re-read the row in case a concurrent DeletePreview / CreatePreview
+	// rebuild fired while we were building. Generation mismatch on the
+	// re-read means a fresh trigger has taken over; tear down what we
+	// built and exit (R9-H1).
+	if err := ps.db.First(&preview, previewID).Error; err != nil {
+		ps.logger.Info("runPreview: row deleted during build; aborting before host creation", "id", previewID)
+		ps.svc.docker.StopAndRemove(preview.ContainerName)
+		removeImage(ctx, imageTag)
+		return
+	}
+	if preview.Generation != gen {
+		ps.logger.Info("runPreview: generation advanced during build; new trigger took over",
+			"id", previewID, "snapshot_gen", gen, "current_gen", preview.Generation)
+		removeImage(ctx, imageTag)
+		return
+	}
+
+	// v0.19: filter Secret-marked env vars when deploying a fork PR.
+	// EnvVar.Secret == true → never sent to fork code (e.g. API
+	// keys, signing secrets). Same-repo PRs get the full set
+	// because fork-author code can't reach them.
+	envVars := project.EnvVarList
+	if preview.IsForkPR {
+		filtered := envVars[:0:0]
+		for _, ev := range envVars {
+			if ev.Secret {
+				continue
+			}
+			filtered = append(filtered, ev)
+		}
+		envVars = filtered
+	}
+	envVars = append(envVars,
+		EnvVar{Key: "PDAI_PREVIEW", Value: "1"},
+		EnvVar{Key: "PDAI_PREVIEW_PR", Value: fmt.Sprintf("%d", preview.PRNumber)},
+		EnvVar{Key: "PDAI_PREVIEW_BRANCH", Value: branch},
+	)
+
+	// R6-C1 fix: two-slot alternation. Slot 0 binds BasePort, slot 1
+	// binds BasePort+5000. Each deploy flips to the unused slot so the
+	// old container keeps serving while the new one comes up, and we
+	// never need to rename+remap ports (which the old implementation
+	// did incorrectly — docker rename doesn't move port bindings, so
+	// Caddy was pointed at a port nothing was listening on).
+	//
+	// currentSlot == -1 on first run → nextSlot = 0
+	// currentSlot == 0             → nextSlot = 1
+	// currentSlot == 1             → nextSlot = 0
+	nextSlot := 0
+	if preview.Slot == 0 {
+		nextSlot = 1
+	}
+	nextPort := preview.BasePort
+	if nextSlot == 1 {
+		nextPort = preview.BasePort + 5000
+	}
+	nextContainer := slotName(preview.ID, nextSlot)
+
+	// Remove any leftover from a previous failed attempt in the same slot.
+	ps.svc.docker.StopAndRemove(nextContainer)
+	if ctx.Err() != nil {
+		return
+	}
+	if _, err := ps.svc.docker.RunWithName(ctx, nextContainer, imageTag, nextPort, envVars); err != nil {
+		ps.markFailed(previewID, gen, fmt.Sprintf("run staging container: %v", err))
+		return
+	}
+
+	// R6-H3 fix: proper TCP readiness probe instead of a flat 3s sleep.
+	// Give the container up to 30s to bind its port; fail fast if it
+	// crashes immediately. Uses the same port dialing probe as the main
+	// deploy healthcheck — Phase B will layer HTTP-level checks on top.
+	if err := waitForPortOpen(ctx, nextPort, 30*time.Second); err != nil {
+		ps.svc.docker.StopAndRemove(nextContainer)
+		ps.markFailed(previewID, gen, fmt.Sprintf("staging container failed to bind port %d: %v", nextPort, err))
+		return
+	}
+
+	// R7-H2: re-check ctx before host updates. CreateHost/UpdateHostUpstream
+	// don't take a ctx and may take seconds (Caddy reload). If the job
+	// was cancelled while waiting for the container, abort before
+	// touching shared infra (Caddy host) we'd then have to undo.
+	if ctx.Err() != nil {
+		ps.svc.docker.StopAndRemove(nextContainer)
+		return
+	}
+
+	// v0.19: gate Caddy host creation for unapproved fork PRs. The
+	// container starts and the build verifies the fork's code is
+	// well-formed, but the public URL stays unwired until an admin
+	// approves via POST /previews/:id/approve.
+	//
+	// v019-R7-H1 fix: NO per-PR lock here. The R3-H1 attempt to take
+	// the lock created a deadlock — runPreview holding it while
+	// CreatePreviewWithFork's drain waits for runPreview to exit
+	// (which runPreview can't do without re-acquiring the lock).
+	// Instead, rely on CAS-style conditional UPDATEs:
+	//
+	//   - host_id write WHERE generation=gen [AND approved=true if fork]
+	//   - on RowsAffected==0 we DeleteHost the orphan we just created
+	//
+	// Race scenarios handled:
+	//   1. RevokePreview commits approved=false between our CreateHost
+	//      and our write → write fails → DeleteHost. ✓
+	//   2. ApprovePreview's createApprovedHost runs concurrently →
+	//      first write wins; loser's WHERE host_id=0 in createApproved-
+	//      Host fails → DeleteHost. ✓
+	//   3. Generation advanced (concurrent rebuild) → write fails →
+	//      DeleteHost (already covered since v0.14). ✓
+	//
+	// Same-repo PRs (IsForkPR=false) skip the approval re-read since
+	// they're never gated.
+	if preview.IsForkPR {
+		var fresh PreviewDeployment
+		if err := ps.db.Select("approved", "host_id").First(&fresh, previewID).Error; err == nil {
+			preview.Approved = fresh.Approved
+			preview.HostID = fresh.HostID
+		}
+	}
+	skipHostForFork := preview.IsForkPR && !preview.Approved
+	if skipHostForFork {
+		ps.logger.Info("preview built but host gated pending fork-PR approval",
+			"preview_id", previewID, "head_repo", preview.HeadRepo)
+	} else if preview.HostID == 0 {
+		// Create the host on first run.
+		hostID, err := ps.coreAPI.CreateHost(pluginpkg.CreateHostRequest{
+			Domain:       preview.Domain,
+			HostType:     "proxy",
+			UpstreamAddr: fmt.Sprintf("localhost:%d", nextPort),
+			TLSEnabled:   true,
+			HTTPRedirect: true,
+			WebSocket:    true,
+			Compression:  true,
+		})
+		if err != nil {
+			ps.svc.docker.StopAndRemove(nextContainer)
+			ps.markFailed(previewID, gen, fmt.Sprintf("create host: %v", err))
+			return
+		}
+		// CAS-style write: WHERE generation=gen AND host_id=0
+		// [AND approved=true if fork]. Defends against:
+		//   - stale generation (concurrent rebuild)
+		//   - revoke-during-create (fork)
+		//   - double-create from ApprovePreview's createApprovedHost
+		hostQuery := ps.db.Model(&PreviewDeployment{}).
+			Where("id = ? AND generation = ? AND host_id = 0", previewID, gen)
+		if preview.IsForkPR {
+			hostQuery = hostQuery.Where("approved = ?", true)
+		}
+		hres := hostQuery.Update("host_id", hostID)
+		if hres.Error != nil || hres.RowsAffected == 0 {
+			ps.logger.Warn("host_id write failed (stale gen / revoked / raced); rolling back created host",
+				"id", previewID, "gen", gen, "host_id", hostID, "err", hres.Error)
+			_ = ps.coreAPI.DeleteHost(hostID)
+			ps.svc.docker.StopAndRemove(nextContainer)
+			return
+		}
+		preview.HostID = hostID
+	} else {
+		// Update existing host's upstream to point at the new slot's port.
+		// Old slot (if any) keeps serving until this call returns; failed
+		// upstream update leaves the old version live.
+		if err := ps.coreAPI.UpdateHostUpstream(preview.HostID, fmt.Sprintf("localhost:%d", nextPort)); err != nil {
+			ps.svc.docker.StopAndRemove(nextContainer)
+			ps.markFailed(previewID, gen, fmt.Sprintf("update host upstream: %v", err))
+			return
+		}
+	}
+
+	// Caddy now points at the new slot. Stop + remove the previous slot
+	// container; this is the only destructive step and it only runs
+	// AFTER traffic has moved.
+	if preview.Slot >= 0 {
+		oldContainer := slotName(preview.ID, preview.Slot)
+		ps.svc.docker.StopAndRemove(oldContainer)
+	}
+
+	// R7-H2 + R9-H1/H2: persist via conditional update — WHERE slot AND
+	// generation. Either guard alone is insufficient (slot=0 ↔ slot=1
+	// alternation could collide with a same-slot stale write; generation
+	// alone could hit a same-generation racing run). Combined, only the
+	// current trigger's final commit lands. RowsAffected==0 means our
+	// work is stale; back out the new container so we don't leave an
+	// orphan listening on the new port.
+	res := ps.db.Model(&PreviewDeployment{}).
+		Where("id = ? AND slot = ? AND generation = ?", previewID, preview.Slot, gen).
+		Updates(map[string]interface{}{
+			"slot":           nextSlot,
+			"port":           nextPort,
+			"container_name": nextContainer,
+			"status":         "running",
+			"failure_reason": "",
+		})
+	if res.Error != nil || res.RowsAffected == 0 {
+		ps.logger.Warn("preview run completed but DB row advanced past us; backing out",
+			"id", previewID, "expected_slot", preview.Slot, "expected_gen", gen, "err", res.Error)
+		ps.svc.docker.StopAndRemove(nextContainer)
+		return
+	}
+	// Reflect the persisted slot/port on the local snapshot so the PR
+	// comment uses the new values, not the pre-swap ones.
+	preview.Slot = nextSlot
+	preview.Port = nextPort
+	preview.ContainerName = nextContainer
+
+	ps.logger.Info("preview deployment running",
+		"project", project.Name, "pr", preview.PRNumber,
+		"domain", preview.Domain, "port", nextPort, "slot", nextSlot)
+
+	// v019-R2-H1 + R7-H1: post-finalize approval reconciliation.
+	// LOCK-FREE — relies on the same conditional UPDATEs createApproved-
+	// Host uses (WHERE host_id=0 AND approved=true). If the gate-
+	// region re-read missed an ApprovePreview that landed during the
+	// build, we createApprovedHost here. If we race ApprovePreview's
+	// own createApprovedHost call, the loser's WHERE host_id=0 fails
+	// and rolls back its CreateHost.
+	//
+	// (R4-H1 Option A makes this branch effectively unreachable —
+	// runPreview only runs after approval. Kept as defense in depth
+	// in case any future refactor revives the unapproved-but-running
+	// state.)
+	if skipHostForFork {
+		var fresh PreviewDeployment
+		if err := ps.db.First(&fresh, previewID).Error; err == nil &&
+			fresh.IsForkPR && fresh.Approved && fresh.HostID == 0 {
+			fresh.Port = nextPort
+			if err := ps.createApprovedHost(&fresh); err != nil {
+				ps.logger.Warn("post-finalize fork host create failed; admin can re-approve to retry",
+					"preview_id", previewID, "err", err)
+			} else {
+				preview.HostID = fresh.HostID
+			}
+		}
+	}
+
+	// B6: post / update the PR comment with the live URL. Best-effort —
+	// failures don't affect the deploy status (already committed above).
+	//
+	// v019-R1-4 fix: skip when HostID==0 (unapproved fork PR). The
+	// comment text promises a live URL; posting it before approval
+	// would mislead the fork author. ApprovePreview will trigger a
+	// re-post path implicitly: the next webhook (synchronize) sees
+	// HostID populated and posts. For first-approval, admin can
+	// manually re-trigger or rely on next push to update the comment.
+	if preview.HostID > 0 {
+		ps.postOrUpdatePRComment(&preview, project)
+	}
+}
+
+// setStatus updates the preview row's status atomically and returns false
+// when the row has been deleted OR the generation has advanced past
+// `gen`. Callers must capture `gen` from the initial First() read and
+// abort without creating external resources if false is returned.
+//
+// R9-H1/H2 fix: pre-Generation, this only checked row existence. A
+// stale runPreview goroutine whose drain timed out could still call
+// setStatus("running") and overwrite a fresh delete-marker. The
+// generation guard ensures only the current trigger's writes land.
+func (ps *PreviewService) setStatus(previewID uint, gen int, status, failureReason string) bool {
+	updates := map[string]interface{}{"status": status}
+	if failureReason != "" {
+		updates["failure_reason"] = failureReason
+	}
+	res := ps.db.Model(&PreviewDeployment{}).
+		Where("id = ? AND generation = ?", previewID, gen).
+		Updates(updates)
+	return res.RowsAffected > 0
+}
+
+// waitForPortOpen polls the loopback port every 500ms until a TCP
+// connection succeeds or the timeout elapses. Returns nil on success.
+// Used as a simple readiness probe for freshly-started preview
+// containers — replaces the previous fixed 3s sleep (R6-H3).
+func waitForPortOpen(ctx context.Context, port int, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	for time.Now().Before(deadline) {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		conn, err := net.DialTimeout("tcp", addr, 1*time.Second)
+		if err == nil {
+			conn.Close()
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+	return fmt.Errorf("timeout after %s waiting for port %d", timeout, port)
+}
+
+// removeImage force-removes a previously built image. Used during cleanup
+// on failure/delete so images don't accumulate.
+func removeImage(ctx context.Context, imageTag string) {
+	_ = exec.CommandContext(ctx, "docker", "rmi", "-f", imageTag).Run()
+}
+
+// isNotFoundErr classifies an error as "the target resource didn't
+// exist". Container / image cleanup must be idempotent — if the item
+// was never created (e.g. build failed before Run) we don't want to
+// flag that as a cleanup failure that traps the row in cleanup_failed
+// forever (R6-M1).
+func isNotFoundErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "no such container") ||
+		strings.Contains(s, "not found") ||
+		strings.Contains(s, "no such object")
+}
+
+// markFailed records the reason on the row and flips status to "failed".
+// Persists `failure_reason` alongside `status` so the UI can show what
+// went wrong without grepping logs.
+//
+// R9-H1 fix: gated on `WHERE generation = ?` so a stale runPreview
+// from a cancelled-but-not-drained trigger cannot overwrite a fresh
+// trigger's "running" state with its own "failed" tail.
+//
+// R10-L1 fix: when the generation guard rejects our write (RowsAffected
+// == 0), the failure was logically subsumed by a fresh trigger — log
+// at debug level instead of error so dashboards aren't flooded with
+// "preview deployment failed" entries that didn't actually persist.
+func (ps *PreviewService) markFailed(previewID uint, gen int, reason string) {
+	res := ps.db.Model(&PreviewDeployment{}).
+		Where("id = ? AND generation = ?", previewID, gen).
+		Updates(map[string]interface{}{
+			"status":         "failed",
+			"failure_reason": truncate(reason, 500),
+		})
+	if res.Error != nil {
+		ps.logger.Error("preview deployment failed (DB write error)",
+			"id", previewID, "gen", gen, "reason", reason, "err", res.Error)
+		return
+	}
+	if res.RowsAffected == 0 {
+		ps.logger.Debug("preview failure not persisted (generation advanced; superseded by newer trigger)",
+			"id", previewID, "gen", gen, "reason", reason)
+		return
+	}
+	ps.logger.Error("preview deployment failed", "id", previewID, "gen", gen, "reason", reason)
+}
+
+func truncate(s string, n int) string {
+	if len(s) > n {
+		return s[:n] + "…"
+	}
+	return s
+}
+
+// DeletePreview removes a preview deployment and cleans up all resources:
+// Caddy host, container (+ staging), image, source dir, log dir, and row.
+//
+// Generation discipline (R9 + R10 + R11; per-PR lock since v0.16):
+//  1. Take the per-PR lock, bump generation, capture deleteGen,
+//     snapshot the in-flight job — all atomic. R11-H1 fix: previously
+//     bump and deleteGen capture were separate calls; a racing
+//     CreatePreview could interleave its own bump between them,
+//     causing DP to "borrow" CP's generation as its deleteGen and
+//     later cancel the wrong (newer) job + delete the wrong row.
+//  2. Release the lock for the 30s cancel-drain so concurrent webhooks
+//     for OTHER PRs aren't blocked on this PR's slow build.
+//  3. On drain timeout, mark cleanup_failed under deleteGen so a
+//     concurrent CreatePreview that has bumped past us doesn't get
+//     its pending state overwritten.
+//  4. Re-take the per-PR lock for destructive cleanup. Re-verify
+//     deleteGen is still current; if a same-PR CreatePreview raced
+//     past us during the drain wait, abort — they own the row.
+//  5. Cleanup external resources. Final row Delete is conditional on
+//     `WHERE generation = deleteGen` as defense in depth.
+func (ps *PreviewService) DeletePreview(id uint) error {
+	var preview PreviewDeployment
+	if err := ps.db.First(&preview, id).Error; err != nil {
+		return fmt.Errorf("preview not found: %w", err)
+	}
+
+	// Per-PR lock (R11-M1 v0.16 fix). Same lock CreatePreview uses
+	// for this PR — different PRs run in parallel.
+	mu := ps.previewLock(preview.ProjectID, preview.PRNumber)
+
+	// 1. Atomic bump + capture + job-snapshot under the per-PR lock.
+	// Without the lock, a CreatePreview can land between Update() and
+	// First() and we'd capture the WRONG deleteGen (R11-H1).
+	mu.Lock()
+	bres := ps.db.Model(&PreviewDeployment{}).
+		Where("id = ?", id).
+		Update("generation", gorm.Expr("generation + 1"))
+	if bres.Error != nil {
+		mu.Unlock()
+		return fmt.Errorf("preview %d: bump generation: %w", id, bres.Error)
+	}
+	if bres.RowsAffected == 0 {
+		mu.Unlock()
+		return fmt.Errorf("preview %d: row vanished before delete", id)
+	}
+	var refreshed PreviewDeployment
+	if err := ps.db.Select("id", "generation").First(&refreshed, id).Error; err != nil {
+		mu.Unlock()
+		return fmt.Errorf("preview %d: re-read after bump: %w", id, err)
+	}
+	deleteGen := refreshed.Generation
+	// Snapshot the in-flight job under the same lock — same reason: a
+	// CP between bump and snapshot would have swapped in a NEW job we
+	// have no business cancelling.
+	ps.jobsMu.Lock()
+	job := ps.jobs[id]
+	ps.jobsMu.Unlock()
+	mu.Unlock()
+
+	// 2. Cancel + drain (lock released; could take 30s — releasing the
+	// per-PR lock here means a concurrent CreatePreview for the SAME
+	// PR could bump generation and take over. We re-verify in step 5).
+	drained := true
+	if job != nil {
+		job.cancel()
+		select {
+		case <-job.done:
+		case <-time.After(30 * time.Second):
+			drained = false
+			ps.logger.Warn("previous preview job did not drain in 30s", "preview_id", id)
+		}
+	}
+
+	// 3. On timeout, mark cleanup_failed under deleteGen guard. If a
+	// concurrent CreatePreview has bumped past us, write fails
+	// RowsAffected==0 — they own the row, our "cleanup_failed" has
+	// no meaning.
+	if !drained {
+		res := ps.db.Model(&PreviewDeployment{}).
+			Where("id = ? AND generation = ?", id, deleteGen).
+			Updates(map[string]interface{}{
+				"status":         "cleanup_failed",
+				"failure_reason": "in-flight build did not drain in 30s; retry delete after build completes",
+			})
+		if res.RowsAffected == 0 {
+			return fmt.Errorf("preview %d: drain timeout AND superseded by concurrent create; aborting", id)
+		}
+		return fmt.Errorf("preview %d: in-flight build did not drain in 30s; retry delete after build completes", id)
+	}
+
+	// 4. Re-take the per-PR lock for destructive cleanup. Brief lock —
+	// only covers synchronous external ops, not the 30s drain above.
+	// Other PRs unaffected (v0.16 R11-M1 fix).
+	mu.Lock()
+	defer mu.Unlock()
+
+	// 5. Re-read the FULL row under the lock and verify ownership.
+	// R12 fix: a CreatePreview that bumped before our bump (then we
+	// bumped on top of it, taking ownership of the resulting gen)
+	// could have launched a runPreview that wrote a fresh HostID to
+	// the row before we got here. Our entry-time `preview.HostID`
+	// snapshot would be stale (commonly =0 for first-deploy previews)
+	// — using it would skip DeleteHost and orphan the Caddy host. Use
+	// the freshly-read values for all subsequent cleanup.
+	if err := ps.db.First(&preview, id).Error; err != nil {
+		return fmt.Errorf("preview %d: re-verify before cleanup: %w", id, err)
+	}
+	if preview.Generation != deleteGen {
+		return fmt.Errorf("preview %d: superseded by concurrent create (gen %d → %d); aborting cleanup", id, deleteGen, preview.Generation)
+	}
+
+	// 6. Destructive cleanup. Order: host (so subdomain stops pointing
+	// at a soon-to-die container) → containers (both slots) → image
+	// → on-disk dirs. The PR comment delete intentionally runs LAST,
+	// AFTER the row delete succeeds (PB-R6-L2): if any cleanup step
+	// fails the row is retained as `cleanup_failed` so admin can
+	// retry, and the PR comment must stay intact for a future retry
+	// to be able to clean it up too. Deleting it eagerly would lose
+	// the comment ID forever on a partial-failure path.
+	ctx, cancel := context.WithTimeout(ps.rootCtx, 60*time.Second)
+	defer cancel()
+
+	var errs []string
+
+	if preview.HostID > 0 {
+		if err := ps.coreAPI.DeleteHost(preview.HostID); err != nil {
+			ps.logger.Warn("delete preview host failed", "host_id", preview.HostID, "err", err)
+			errs = append(errs, fmt.Sprintf("delete host: %v", err))
+		}
+	}
+
+	for _, slot := range []int{0, 1} {
+		name := slotName(id, slot)
+		if err := ps.coreAPI.DockerRemoveContainer(name, true); err != nil && !isNotFoundErr(err) {
+			errs = append(errs, fmt.Sprintf("remove container %s: %v", name, err))
+		}
+	}
+
+	if preview.ImageTag != "" {
+		removeImage(ctx, preview.ImageTag)
+	}
+
+	srcDir := filepath.Join(ps.svc.dataDir, "preview-sources", fmt.Sprintf("preview_%d", id))
+	logDir := filepath.Join(ps.svc.dataDir, "logs", fmt.Sprintf("preview_%d", id))
+	if err := os.RemoveAll(srcDir); err != nil {
+		errs = append(errs, fmt.Sprintf("remove src dir: %v", err))
+	}
+	if err := os.RemoveAll(logDir); err != nil {
+		errs = append(errs, fmt.Sprintf("remove log dir: %v", err))
+	}
+
+	// 7. DB row. cleanup_failed and Delete both gated by deleteGen
+	// (R10-H1, R10-H2). Even though the per-PR lock prevents new
+	// bumps from same-PR callers, the gen guard is belt-and-suspenders
+	// against any future refactor that releases the lock earlier.
+	if len(errs) > 0 {
+		res := ps.db.Model(&PreviewDeployment{}).
+			Where("id = ? AND generation = ?", id, deleteGen).
+			Updates(map[string]interface{}{
+				"status":         "cleanup_failed",
+				"failure_reason": strings.Join(errs, "; "),
+			})
+		if res.RowsAffected == 0 {
+			ps.logger.Warn("preview cleanup_failed write skipped (gen advanced under lock — should be impossible)",
+				"id", id, "expected_gen", deleteGen)
+		}
+		ps.logger.Warn("preview cleanup partial failure; row retained as cleanup_failed",
+			"id", id, "errs", errs)
+		return fmt.Errorf("preview cleanup partial failure: %s", strings.Join(errs, "; "))
+	}
+
+	dres := ps.db.Where("id = ? AND generation = ?", id, deleteGen).
+		Delete(&PreviewDeployment{})
+	if dres.Error != nil {
+		return fmt.Errorf("delete record: %w", dres.Error)
+	}
+	if dres.RowsAffected == 0 {
+		// Should be impossible given the per-PR lock but log as defense in depth.
+		ps.logger.Warn("preview row delete skipped (gen advanced under lock — should be impossible)",
+			"id", id, "expected_gen", deleteGen)
+		return fmt.Errorf("preview %d: superseded between cleanup and row delete", id)
+	}
+	// PB-R6-L2: only NOW (after the row is gone) do we remove the PR
+	// comment. If any earlier cleanup step had failed and we'd
+	// returned cleanup_failed, the comment ID would still be on the
+	// row and a retry could pick it up. Deleting comments eagerly
+	// would have leaked them on partial-failure paths.
+	if preview.PRCommentID > 0 {
+		ps.deletePRCommentBestEffort(&preview)
+	}
+	// R11-M1 v0.16: evict the per-PR lock entry. The PR is terminal —
+	// no more webhooks expected for this number. If a fresh PR
+	// happens to reuse the number later (uncommon but possible after
+	// admin deletes + a new PR opens), CreatePreview will lazily
+	// recreate the lock via LoadOrStore.
+	ps.evictPreviewLock(preview.ProjectID, preview.PRNumber)
+	ps.logger.Info("preview deployment deleted", "id", id, "domain", preview.Domain)
+	return nil
+}
+
+// CleanupExpired removes all expired preview deployments regardless of
+// their current status. Codex M2 fix: previously only `status=running`
+// was swept, so rows stuck in `pending` / `building` / `failed` leaked
+// past their expires_at and kept disk + images + hosts around forever.
+func (ps *PreviewService) CleanupExpired() int {
+	var expired []PreviewDeployment
+	ps.db.Where("expires_at < ?", time.Now()).Find(&expired)
+
+	count := 0
+	for _, p := range expired {
+		if err := ps.DeletePreview(p.ID); err != nil {
+			ps.logger.Error("cleanup expired preview failed", "id", p.ID, "err", err)
+		} else {
+			count++
+		}
+	}
+	return count
+}
+
+// ApprovePreview (v0.19+) marks a fork-PR preview as approved by an
+// admin and creates the Caddy host so the public URL becomes
+// reachable. No-op for non-fork previews (they bypass the gate).
+//
+// Caller must verify the user is an admin (handler enforces).
+// Holds the per-PR lock so we don't race a concurrent rebuild's
+// runPreview which is also conditionally creating the host.
+func (ps *PreviewService) ApprovePreview(id uint, approverUserID uint) error {
+	var preview PreviewDeployment
+	if err := ps.db.First(&preview, id).Error; err != nil {
+		return fmt.Errorf("preview not found: %w", err)
+	}
+	if !preview.IsForkPR {
+		// No gate to lift on same-repo previews; report success
+		// idempotently.
+		return nil
+	}
+	mu := ps.previewLock(preview.ProjectID, preview.PRNumber)
+	mu.Lock()
+	defer mu.Unlock()
+
+	// Re-read under the lock — concurrent rebuild may have changed
+	// state. Approval flips a binary field; rebuilds preserve it.
+	if err := ps.db.First(&preview, id).Error; err != nil {
+		return fmt.Errorf("re-read preview: %w", err)
+	}
+	// v019-R1-3 fix: idempotency check must verify BOTH approved AND
+	// host_id non-zero. Otherwise a previous createApprovedHost
+	// failure would have persisted approved=true with host_id=0;
+	// admin clicking approve again would early-return without
+	// retrying the host create.
+	if preview.Approved && preview.HostID > 0 {
+		return nil // fully approved AND wired up — idempotent
+	}
+
+	// Persist approval (idempotent if already true).
+	if !preview.Approved {
+		now := time.Now()
+		res := ps.db.Model(&PreviewDeployment{}).
+			Where("id = ?", id).
+			Updates(map[string]interface{}{
+				"approved":            true,
+				"approved_at":         now,
+				"approved_by_user_id": approverUserID,
+				// v019-R4-H3: record the SHA admin actually approved.
+				// upsertPreviewRow's rebuild path resets approved if a
+				// future webhook brings a different head.sha — fork
+				// author can't approve-then-push-malicious-code.
+				"approved_head_sha": preview.HeadSHA,
+			})
+		if res.Error != nil {
+			return fmt.Errorf("mark approved: %w", res.Error)
+		}
+		preview.Approved = true
+		preview.ApprovedAt = &now
+		preview.ApprovedByUserID = approverUserID
+		preview.ApprovedHeadSHA = preview.HeadSHA
+	}
+
+	// v019-R4-H1 Option A: ApprovePreview now triggers the build
+	// itself when the row is in "awaiting_approval" (the new state
+	// CreatePreviewWithFork sets for unapproved fork PRs). The build
+	// goroutine clones, builds, runs, AND creates the host — so on
+	// successful approve+build, no separate createApprovedHost call
+	// is needed.
+	//
+	// Three branches:
+	//   awaiting_approval → spawn runPreview (clean build from scratch)
+	//   running + HostID==0 → createApprovedHost (legacy v0.19-pre-R4-H1
+	//     state — build done, host missing. Shouldn't happen with
+	//     R4-H1 but kept as defense in depth for any prior rows.)
+	//   else → nothing to do (host already up, or build still in
+	//     progress and will pick up Approved on re-read)
+	switch {
+	case preview.Status == "awaiting_approval":
+		ps.spawnPreviewBuild(&preview)
+		ps.logger.Info("preview approved; build kicked off",
+			"preview_id", id, "approver", approverUserID, "head_repo", preview.HeadRepo)
+	case preview.Status == "running" && preview.HostID == 0:
+		if err := ps.createApprovedHost(&preview); err != nil {
+			return fmt.Errorf("approval recorded but host create failed: %w", err)
+		}
+		if project, err := ps.svc.GetProject(preview.ProjectID); err == nil {
+			ps.postOrUpdatePRComment(&preview, project)
+		}
+		ps.logger.Info("preview approved (legacy build-already-done path)",
+			"preview_id", id, "approver", approverUserID, "head_repo", preview.HeadRepo)
+	default:
+		ps.logger.Info("preview approved (no build action needed)",
+			"preview_id", id, "approver", approverUserID, "status", preview.Status)
+	}
+	return nil
+}
+
+// spawnPreviewBuild registers a runPreview goroutine for a preview
+// whose build was deferred (fork PR awaiting approval). Caller must
+// hold the per-PR lock OR be confident no concurrent CreatePreview
+// is racing — typically called from ApprovePreview which holds the
+// lock. Mirrors the goroutine-spawn block at the end of
+// CreatePreviewWithFork.
+func (ps *PreviewService) spawnPreviewBuild(preview *PreviewDeployment) {
+	jobCtx, jobCancel := context.WithCancel(ps.rootCtx)
+	newJob := &previewJob{cancel: jobCancel, done: make(chan struct{})}
+	ps.jobsMu.Lock()
+	oldJob := ps.jobs[preview.ID]
+	ps.jobs[preview.ID] = newJob
+	ps.jobsMu.Unlock()
+	if oldJob != nil {
+		// Should be drained already (CreatePreviewWithFork drained it
+		// on the awaiting-approval path). Defensive: cancel + wait
+		// briefly.
+		oldJob.cancel()
+		select {
+		case <-oldJob.done:
+		case <-time.After(5 * time.Second):
+			ps.logger.Warn("approve: stale job did not drain in 5s; proceeding",
+				"preview_id", preview.ID)
+		}
+	}
+	// Reset status to pending so runPreview's setStatus("building")
+	// passes the gen guard.
+	ps.db.Model(&PreviewDeployment{}).
+		Where("id = ?", preview.ID).
+		Update("status", "pending")
+	previewID := preview.ID
+	projectID := preview.ProjectID
+	branch := preview.Branch
+	// v019-R11-H1: pin spawn-time gen + headSHA so runPreview uses
+	// the approved snapshot even if a force-push webhook lands
+	// before runPreview's first DB read.
+	spawnGen := preview.Generation
+	spawnSHA := preview.HeadSHA
+	ps.wg.Add(1)
+	go func() {
+		defer ps.wg.Done()
+		defer close(newJob.done)
+		defer ps.clearJob(previewID, newJob)
+		ps.runPreview(jobCtx, previewID, projectID, branch, spawnGen, spawnSHA)
+	}()
+}
+
+// RevokePreview (v0.19+) clears approval and tears down the Caddy
+// host. Container keeps running so admin can inspect it; rebuilding
+// stays gated until next approval.
+func (ps *PreviewService) RevokePreview(id uint) error {
+	var preview PreviewDeployment
+	if err := ps.db.First(&preview, id).Error; err != nil {
+		return fmt.Errorf("preview not found: %w", err)
+	}
+	if !preview.IsForkPR {
+		return fmt.Errorf("revoke is only meaningful for fork PR previews")
+	}
+	mu := ps.previewLock(preview.ProjectID, preview.PRNumber)
+	mu.Lock()
+	defer mu.Unlock()
+
+	if err := ps.db.First(&preview, id).Error; err != nil {
+		return fmt.Errorf("re-read preview: %w", err)
+	}
+	// v019-R4-H2 fix: idempotency check must allow retry when a
+	// previous revoke failed at DeleteHost (approved=false but
+	// host_id retained). Without this, the row is stuck — retry
+	// would early-return and the orphan host stays public.
+	if !preview.Approved && preview.HostID == 0 {
+		return nil // fully revoked — idempotent
+	}
+
+	// Tear down the host first so the URL stops resolving — then
+	// clear the approval flag. Container intentionally kept alive
+	// for inspection; admin can DeletePreview to fully reclaim.
+	//
+	// v019-R2-H3 fix: if DeleteHost fails, KEEP host_id on the row
+	// so an operator can retry (re-revoke) and we don't orphan a
+	// Caddy host that's still serving traffic but no longer tracked
+	// in DB. Approval flag still flips so the UI shows "not
+	// approved" — but host_id stays until DeleteHost succeeds.
+	hostCleared := true
+	if preview.HostID > 0 {
+		if err := ps.coreAPI.DeleteHost(preview.HostID); err != nil {
+			ps.logger.Warn("revoke: host delete failed; keeping host_id for retry",
+				"host_id", preview.HostID, "err", err)
+			hostCleared = false
+		}
+	}
+	updates := map[string]interface{}{
+		"approved":            false,
+		"approved_at":         nil,
+		"approved_by_user_id": 0,
+		"approved_head_sha":   "",
+	}
+	if hostCleared {
+		updates["host_id"] = 0
+	}
+	if err := ps.db.Model(&PreviewDeployment{}).
+		Where("id = ?", id).
+		Updates(updates).Error; err != nil {
+		return fmt.Errorf("mark revoked: %w", err)
+	}
+	if !hostCleared {
+		// Surface to caller so they know revoke is partial — UI shows
+		// "approval revoked but host still up; retry to clean up".
+		return fmt.Errorf("approval cleared but Caddy host delete failed (host_id=%d retained for retry)", preview.HostID)
+	}
+	ps.logger.Info("preview approval revoked", "preview_id", id, "head_repo", preview.HeadRepo)
+	return nil
+}
+
+// createApprovedHost creates the Caddy host for a freshly-approved
+// fork preview. Updates preview.HostID on success.
+//
+// v019-R7-H1: CAS-style write. Caller may or may not hold the per-PR
+// lock; either way the conditional UPDATE WHERE host_id=0 AND
+// approved=true ensures only one writer wins. Loser DeleteHosts the
+// orphan it just created. This eliminates the deadlock between
+// runPreview (which used to take the lock) and outer callers
+// (CreatePreview/Approve/Revoke draining runPreview).
+func (ps *PreviewService) createApprovedHost(preview *PreviewDeployment) error {
+	hostID, err := ps.coreAPI.CreateHost(pluginpkg.CreateHostRequest{
+		Domain:       preview.Domain,
+		HostType:     "proxy",
+		UpstreamAddr: fmt.Sprintf("localhost:%d", preview.Port),
+		TLSEnabled:   true,
+		HTTPRedirect: true,
+		WebSocket:    true,
+		Compression:  true,
+	})
+	if err != nil {
+		return fmt.Errorf("create host: %w", err)
+	}
+	res := ps.db.Model(&PreviewDeployment{}).
+		Where("id = ? AND host_id = 0 AND approved = ?", preview.ID, true).
+		Update("host_id", hostID)
+	if res.Error != nil {
+		_ = ps.coreAPI.DeleteHost(hostID)
+		return fmt.Errorf("write host_id: %w", res.Error)
+	}
+	if res.RowsAffected == 0 {
+		// Lost the race — another writer set host_id (runPreview's
+		// gate-region create, or another concurrent createApproved-
+		// Host call). DeleteHost the orphan and return success — the
+		// other writer's host is the canonical one.
+		_ = ps.coreAPI.DeleteHost(hostID)
+		// Re-read to surface the winner's host_id to caller.
+		var fresh PreviewDeployment
+		if rerr := ps.db.Select("host_id").First(&fresh, preview.ID).Error; rerr == nil {
+			preview.HostID = fresh.HostID
+		}
+		return nil
+	}
+	preview.HostID = hostID
+	return nil
+}
+
+// ListByProject returns all preview deployments for a project.
+func (ps *PreviewService) ListByProject(projectID uint) ([]PreviewDeployment, error) {
+	var previews []PreviewDeployment
+	err := ps.db.Where("project_id = ?", projectID).Order("created_at DESC").Find(&previews).Error
+	return previews, err
+}
+
+// previewLogPath returns the canonical path to a preview's build log.
+// All path components are derived from the validated integer ID; no
+// user-controlled string is ever joined into this path.
+func (ps *PreviewService) previewLogPath(previewID uint) string {
+	return filepath.Join(ps.svc.dataDir, "logs", fmt.Sprintf("preview_%d", previewID), "build.log")
+}
+
+// previewLogMaxBytes caps how much of a preview's build log we'll read
+// in one request — both for the static fetch and for each SSE poll.
+// Prevents pathological multi-GB logs from OOMing the panel. PB-R1-H2.
+const previewLogMaxBytes = 2 * 1024 * 1024 // 2 MiB
+
+// ReadBuildLog returns the current contents of the preview's build log,
+// capped at previewLogMaxBytes (returns the TAIL of the file when over,
+// since the most recent output is what users want to see). Empty file
+// (or missing — pending preview that hasn't started writing) returns
+// an empty slice, not an error.
+func (ps *PreviewService) ReadBuildLog(previewID uint) ([]byte, error) {
+	path := ps.previewLogPath(previewID)
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []byte{}, nil
+		}
+		return nil, fmt.Errorf("open build log: %w", err)
+	}
+	defer f.Close()
+	stat, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("stat build log: %w", err)
+	}
+	size := stat.Size()
+	// PB-R2-M2 fix: use io.ReadFull so a short read (e.g. concurrent
+	// writer flushes between Stat and Read) doesn't return a buffer
+	// padded with zero bytes.
+	if size <= previewLogMaxBytes {
+		buf := make([]byte, size)
+		n, err := io.ReadFull(f, buf)
+		if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
+			return nil, fmt.Errorf("read build log: %w", err)
+		}
+		return buf[:n], nil
+	}
+	// Tail the last previewLogMaxBytes bytes.
+	if _, err := f.Seek(size-previewLogMaxBytes, 0); err != nil {
+		return nil, fmt.Errorf("seek build log: %w", err)
+	}
+	buf := make([]byte, previewLogMaxBytes)
+	n, err := io.ReadFull(f, buf)
+	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
+		return nil, fmt.Errorf("read build log tail: %w", err)
+	}
+	// Prepend a marker so callers know we truncated.
+	prefix := []byte(fmt.Sprintf("[…truncated to last %d bytes…]\n", previewLogMaxBytes))
+	return append(prefix, buf[:n]...), nil
+}
+
+// StreamBuildLog tails the preview's build.log over Server-Sent Events.
+//
+// Protocol:
+//   - First flush: full existing file content as a single `event: log`
+//   - Then poll every 500ms for new bytes, emit as `event: log`
+//   - Every 2s, re-read the row's status; emit `event: status` when it
+//     changes
+//   - When status leaves the in-progress set ("pending", "building"),
+//     emit `event: done` with the final status and close
+//   - Closes early on client disconnect
+//
+// Single-flight per request — no central pub/sub. Polling is cheap
+// (small file, local fs) and avoids the complexity of inotify or
+// fanout to multiple subscribers. Phase B trade-off; can move to
+// hub-based fanout later if needed.
+func (ps *PreviewService) StreamBuildLog(c *gin.Context, previewID uint) {
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("X-Accel-Buffering", "no") // disable nginx buffering if proxied
+	c.Writer.Flush()
+
+	path := ps.previewLogPath(previewID)
+	clientGone := c.Request.Context().Done()
+
+	// Track read offset and current status.
+	var offset int64
+	emit := func(event, data string) bool {
+		if _, err := fmt.Fprintf(c.Writer, "event: %s\ndata: %s\n\n", event, data); err != nil {
+			return false
+		}
+		c.Writer.Flush()
+		return true
+	}
+
+	// Read+emit any new bytes since `offset`. Returns false on write
+	// failure (client gone). Handles file-truncation (e.g. rebuild
+	// recreated build.log via NewLogWriter) by detecting size < offset
+	// and resetting to 0 + emitting a `reset` event so the UI can
+	// clear its buffer (PB-R1-H1). Caps each poll at previewLogMaxBytes
+	// so an exploding log can't allocate unbounded memory (PB-R1-H2).
+	emitNewBytes := func() bool {
+		f, err := os.Open(path)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				ps.logger.Debug("stream open log", "id", previewID, "err", err)
+			}
+			return true
+		}
+		defer f.Close()
+		stat, err := f.Stat()
+		if err != nil {
+			return true
+		}
+		size := stat.Size()
+		if size < offset {
+			// File was truncated. Tell the client to discard its buffer
+			// and resume from byte 0. Use emit() (not raw Fprintf) so
+			// the write is flushed immediately — PB-R2-M1 fix.
+			if !emit("reset", "log truncated") {
+				return false
+			}
+			offset = 0
+		}
+		if size <= offset {
+			return true
+		}
+		readN := size - offset
+		if readN > previewLogMaxBytes {
+			// Skip to the tail; UI will see a marker line.
+			offset = size - previewLogMaxBytes
+			if !emit("log", fmt.Sprintf("[…truncated %d bytes…]", readN-previewLogMaxBytes)) {
+				return false
+			}
+			readN = previewLogMaxBytes
+		}
+		if _, err := f.Seek(offset, 0); err != nil {
+			ps.logger.Warn("stream seek log", "id", previewID, "err", err)
+			emit("error", "log seek failed; will retry")
+			return true
+		}
+		buf := make([]byte, readN)
+		n, err := io.ReadFull(f, buf)
+		if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
+			// PB-R3-L1 fix: surface real IO errors instead of silently
+			// returning. Without this an unreadable log would leave
+			// the client polling forever, looking like the build was
+			// silently stuck. The `error` event is informational —
+			// stream stays open so transient errors recover.
+			ps.logger.Warn("stream read log", "id", previewID, "err", err)
+			emit("error", fmt.Sprintf("log read error: %v", err))
+			return true
+		}
+		if n <= 0 {
+			return true
+		}
+		offset += int64(n)
+		// SSE data lines must escape newlines — split into multiple
+		// data: lines per spec, OR base64 to keep it simple. We use
+		// the multi-line form because it's human-readable in DevTools.
+		for _, line := range strings.Split(strings.TrimRight(string(buf[:n]), "\n"), "\n") {
+			if _, err := fmt.Fprintf(c.Writer, "event: log\ndata: %s\n\n", line); err != nil {
+				return false
+			}
+		}
+		c.Writer.Flush()
+		return true
+	}
+
+	// Read current status and emit `status` event if it changed since
+	// last poll. Returns (terminal, ok). terminal=true when status is
+	// outside the in-progress set; ok=false on write failure.
+	var lastStatus string
+	checkStatus := func() (terminal bool, ok bool) {
+		var p PreviewDeployment
+		if err := ps.db.Select("status").First(&p, previewID).Error; err != nil {
+			// Row vanished — treat as terminal ("deleted").
+			if lastStatus != "deleted" {
+				if !emit("status", "deleted") {
+					return true, false
+				}
+				lastStatus = "deleted"
+			}
+			return true, true
+		}
+		if p.Status != lastStatus {
+			if !emit("status", p.Status) {
+				return false, false
+			}
+			lastStatus = p.Status
+		}
+		switch p.Status {
+		case "pending", "building":
+			return false, true
+		default:
+			return true, true
+		}
+	}
+
+	if !emitNewBytes() {
+		return
+	}
+	if terminal, ok := checkStatus(); !ok {
+		return
+	} else if terminal {
+		emit("done", lastStatus)
+		return
+	}
+
+	logTick := time.NewTicker(500 * time.Millisecond)
+	defer logTick.Stop()
+	statusTick := time.NewTicker(2 * time.Second)
+	defer statusTick.Stop()
+
+	// Hard ceiling so a stuck client doesn't pin a goroutine forever.
+	timeout := time.After(20 * time.Minute)
+
+	for {
+		select {
+		case <-clientGone:
+			return
+		case <-timeout:
+			emit("done", "stream-timeout")
+			return
+		case <-logTick.C:
+			if !emitNewBytes() {
+				return
+			}
+		case <-statusTick.C:
+			if terminal, ok := checkStatus(); !ok {
+				return
+			} else if terminal {
+				// One last log read so we don't miss the final write.
+				emitNewBytes()
+				emit("done", lastStatus)
+				return
+			}
+		}
+	}
+}
+
+// validPreviewDomain checks that a generated preview FQDN fits within
+// DNS limits — ≤253 total chars, each label ≤63. Called at create
+// time (PB-R5-H2) so an over-long wildcard_domain or project name
+// fails fast with an admin-actionable error rather than producing
+// invalid Caddy host config later.
+func validPreviewDomain(fqdn string) bool {
+	if fqdn == "" || len(fqdn) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(fqdn, ".") {
+		if label == "" || len(label) > 63 {
+			return false
+		}
+	}
+	return true
+}
+
+// sanitizeForDomain converts a string to a DNS-safe label.
+//
+// RFC 1035 labels: 1–63 chars, [a-z0-9-], can't start or end with `-`.
+// We cap at 20 chars here to leave room for `pr-<N>-` prefix + `-<id>`
+// suffix + the wildcard domain. Truncation happens BEFORE final trim so
+// a long-name truncation can't leave a trailing hyphen (Codex M3 fix).
+func sanitizeForDomain(s string) string {
+	var result []byte
+	for _, c := range []byte(s) {
+		switch {
+		case c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '-':
+			result = append(result, c)
+		case c >= 'A' && c <= 'Z':
+			result = append(result, c+32)
+		default:
+			result = append(result, '-')
+		}
+	}
+	s = string(result)
+	// Truncate FIRST — trimming after truncation is what guarantees no
+	// trailing hyphen regardless of where the boundary lands.
+	if len(s) > 20 {
+		s = s[:20]
+	}
+	s = strings.Trim(s, "-")
+	if s == "" {
+		s = "app"
+	}
+	return s
+}
+
+// init registers the PreviewDeployment table for auto-migration.
+func init() {
+	// Table migration happens in plugin.go Init().
+	_ = PreviewDeployment{}
+	_ = os.Getenv // suppress unused import
+}

@@ -1,0 +1,73 @@
+package ai
+
+import (
+	"time"
+
+	"gorm.io/gorm"
+)
+
+// Conversation represents a chat conversation.
+type Conversation struct {
+	ID        uint           `json:"id" gorm:"primaryKey"`
+	UserID    uint           `json:"user_id" gorm:"index;not null;default:0"`
+	Title     string         `json:"title"`
+	CreatedAt time.Time      `json:"created_at"`
+	UpdatedAt time.Time      `json:"updated_at"`
+	DeletedAt gorm.DeletedAt `json:"-" gorm:"index"`
+	Messages  []Message      `json:"messages,omitempty" gorm:"foreignKey:ConversationID;constraint:OnDelete:CASCADE"`
+}
+
+func (Conversation) TableName() string { return "plugin_ai_conversations" }
+
+// Message is a single message in a conversation.
+type Message struct {
+	ID             uint      `json:"id" gorm:"primaryKey"`
+	ConversationID uint      `json:"conversation_id" gorm:"index"`
+	Role           string    `json:"role"` // "user", "assistant", "system"
+	Content        string    `json:"content"`
+	CreatedAt      time.Time `json:"created_at"`
+}
+
+func (Message) TableName() string { return "plugin_ai_messages" }
+
+// ChatRequest is the request body for the chat endpoint.
+type ChatRequest struct {
+	ConversationID uint   `json:"conversation_id"` // 0 = new conversation
+	Message        string `json:"message"`
+	Context        string `json:"context"` // optional page context
+}
+
+// GenerateComposeRequest for text-to-template.
+type GenerateComposeRequest struct {
+	Description string `json:"description"`
+}
+
+// DiagnoseRequest for error diagnosis.
+type DiagnoseRequest struct {
+	Logs    string `json:"logs"`
+	Context string `json:"context"` // optional: what the user was trying to do
+}
+
+// InspectionRecord stores the result of a system health inspection.
+type InspectionRecord struct {
+	ID           uint      `json:"id" gorm:"primaryKey"`
+	Timestamp    time.Time `json:"timestamp"`
+	OverallScore string    `json:"overall_score" gorm:"size:16"`
+	FindingsJSON string    `json:"findings_json" gorm:"type:text"`
+	AISummary    string    `json:"ai_summary" gorm:"type:text"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+func (InspectionRecord) TableName() string { return "plugin_ai_inspections" }
+
+// AIConfig holds the AI provider configuration.
+type AIConfig struct {
+	BaseURL        string `json:"base_url"`
+	APIKey         string `json:"api_key"` // masked in response
+	Model          string `json:"model"`
+	APIFormat      string `json:"api_format"`      // openai-chat | anthropic-messages | google-generativeai
+	EmbeddingModel string `json:"embedding_model"` // model for /v1/embeddings (empty = disabled)
+	// Separate embedding API credentials (optional — falls back to main base_url/api_key if empty).
+	EmbeddingBaseURL string `json:"embedding_base_url,omitempty"`
+	EmbeddingAPIKey  string `json:"embedding_api_key,omitempty"` // masked in response
+}

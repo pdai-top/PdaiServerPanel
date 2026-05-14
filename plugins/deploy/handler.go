@@ -1,0 +1,1207 @@
+package deploy
+
+import (
+	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"strconv"
+	"strings"
+
+	"github.com/gin-gonic/gin"
+	"github.com/pdai/pdai/plugins/deploy/builders"
+)
+
+// Handler provides HTTP handlers for the deploy plugin API.
+type Handler struct {
+	svc *Service
+}
+
+// NewHandler creates a new deploy handler.
+func NewHandler(svc *Service) *Handler {
+	return &Handler{svc: svc}
+}
+
+// ListProjects GET /api/plugins/deploy/projects
+func (h *Handler) ListProjects(c *gin.Context) {
+	projects, err := h.svc.ListProjects()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, projects)
+}
+
+// GetProject GET /api/plugins/deploy/projects/:id
+func (h *Handler) GetProject(c *gin.Context) {
+	id, err := parseUintParam(c, "id")
+	if err != nil {
+		return
+	}
+	project, err := h.svc.GetProject(id)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "project not found"})
+		return
+	}
+	// Mask env var values for non-admin users (viewers/operators can see keys but not values).
+	role, _ := c.Get("user_role")
+	if role != "admin" && role != "owner" {
+		for i := range project.EnvVarList {
+			project.EnvVarList[i].Value = "***"
+		}
+	}
+	c.JSON(http.StatusOK, project)
+}
+
+// CreateProject POST /api/plugins/deploy/projects
+func (h *Handler) CreateProject(c *gin.Context) {
+	var req struct {
+		Name               string   `json:"name" binding:"required"`
+		Domain             string   `json:"domain"`
+		GitURL             string   `json:"git_url" binding:"required"`
+		GitBranch          string   `json:"git_branch"`
+		DeployKey          string   `json:"deploy_key"`
+		Framework          string   `json:"framework"`
+		BuildCommand       string   `json:"build_command"`
+		StartCommand       string   `json:"start_command"`
+		InstallCmd         string   `json:"install_command"`
+		Port               int      `json:"port"`
+		AutoDeploy         bool     `json:"auto_deploy"`
+		EnvVars            []EnvVar `json:"env_vars"`
+		DeployMode         string   `json:"deploy_mode"` // bare | docker
+		HealthCheckPath    string   `json:"health_check_path"`
+		HealthCheckTimeout int      `json:"health_check_timeout"`
+		HealthCheckRetries int      `json:"health_check_retries"`
+		MemoryLimit        int      `json:"memory_limit"`
+		CPULimit           int      `json:"cpu_limit"`
+		BuildTimeout       int      `json:"build_timeout"`
+		// GitHub App auth fields
+		AuthMethod           string `json:"auth_method"`
+		GitHubAppID          int64  `json:"github_app_id"`
+		GitHubPrivateKey     string `json:"github_private_key"`
+		GitHubInstallationID int64  `json:"github_installation_id"`
+		// GitHub OAuth fields
+		GitHubOAuthInstallID uint   `json:"github_oauth_install_id"`
+		GitHubRepoFullName   string `json:"github_repo_full_name"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	branch := req.GitBranch
+	if branch == "" {
+		branch = "main"
+	}
+
+	project := &Project{
+		Name:                 req.Name,
+		Domain:               req.Domain,
+		GitURL:               req.GitURL,
+		GitBranch:            branch,
+		DeployKey:            req.DeployKey,
+		Framework:            req.Framework,
+		BuildCommand:         req.BuildCommand,
+		StartCommand:         req.StartCommand,
+		InstallCmd:           req.InstallCmd,
+		Port:                 req.Port,
+		AutoDeploy:           req.AutoDeploy,
+		EnvVarList:           req.EnvVars,
+		DeployMode:           req.DeployMode,
+		HealthCheckPath:      req.HealthCheckPath,
+		HealthCheckTimeout:   req.HealthCheckTimeout,
+		HealthCheckRetries:   req.HealthCheckRetries,
+		MemoryLimit:          req.MemoryLimit,
+		CPULimit:             req.CPULimit,
+		BuildTimeout:         req.BuildTimeout,
+		AuthMethod:           req.AuthMethod,
+		GitHubAppID:          req.GitHubAppID,
+		GitHubPrivateKey:     req.GitHubPrivateKey,
+		GitHubInstallationID: req.GitHubInstallationID,
+		GitHubOAuthInstallID: req.GitHubOAuthInstallID,
+		GitHubRepoFullName:   req.GitHubRepoFullName,
+	}
+
+	if err := h.svc.CreateProject(project); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusCreated, project)
+}
+
+// UpdateProject PUT /api/plugins/deploy/projects/:id
+func (h *Handler) UpdateProject(c *gin.Context) {
+	id, err := parseUintParam(c, "id")
+	if err != nil {
+		return
+	}
+
+	var req map[string]interface{}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Allowlist: only permit safe fields to be updated.
+	allowed := map[string]bool{
+		"name": true, "domain": true, "git_url": true, "git_branch": true,
+		"deploy_key": true, "framework": true, "build_command": true,
+		"start_command": true, "install_command": true, "port": true,
+		"auto_deploy": true, "env_vars": true, "deploy_mode": true,
+		"health_check_path": true, "health_check_timeout": true, "health_check_retries": true,
+		"health_check_method": true, "health_check_expect_code": true,
+		"health_check_expect_body": true, "health_check_start_period": true,
+		"memory_limit": true, "cpu_limit": true, "build_timeout": true, "build_type": true,
+		"auth_method": true, "github_app_id": true, "webhook_secret": true,
+		"github_private_key": true, "github_installation_id": true,
+		"github_oauth_install_id": true, "github_repo_full_name": true,
+		"preview_enabled": true, "preview_expiry": true, "github_token": true,
+		"accept_fork_pr_previews": true, // v0.19: per-project fork PR opt-in
+		"git_poll_enabled":        true, "git_poll_interval_sec": true,
+	}
+	filtered := make(map[string]interface{})
+	for k, v := range req {
+		if allowed[k] {
+			filtered[k] = v
+		}
+	}
+
+	// Validate build_type against allowlist.
+	if bt, ok := filtered["build_type"]; ok {
+		btStr, isStr := bt.(string)
+		if !isStr || !builders.ValidBuilderTypes[btStr] {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid build_type: must be dockerfile, nixpacks, paketo, railpack, static, auto, or empty"})
+			return
+		}
+	}
+
+	// Clamp git poll interval up to the safety floor; reject obviously bad
+	// values so misconfiguration cannot DOS the remote.
+	if iv, ok := filtered["git_poll_interval_sec"]; ok {
+		var n int
+		switch v := iv.(type) {
+		case float64:
+			n = int(v)
+		case int:
+			n = v
+		}
+		if n < 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "git_poll_interval_sec must be non-negative"})
+			return
+		}
+		if n > 0 && n < MinPollIntervalSec {
+			n = MinPollIntervalSec
+		}
+		filtered["git_poll_interval_sec"] = n
+	}
+
+	// Handle env_vars specially: convert from JSON array to []EnvVar then to JSON string
+	if raw, ok := filtered["env_vars"]; ok {
+		data, _ := json.Marshal(raw)
+		var envVars []EnvVar
+		if err := json.Unmarshal(data, &envVars); err == nil {
+			filtered["env_vars"] = envVars
+		}
+	}
+
+	if err := h.svc.UpdateProject(id, filtered); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// DeleteProject DELETE /api/plugins/deploy/projects/:id
+func (h *Handler) DeleteProject(c *gin.Context) {
+	id, err := parseUintParam(c, "id")
+	if err != nil {
+		return
+	}
+	if err := h.svc.DeleteProject(id); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// BuildProject POST /api/plugins/deploy/projects/:id/build
+func (h *Handler) BuildProject(c *gin.Context) {
+	id, err := parseUintParam(c, "id")
+	if err != nil {
+		return
+	}
+	if err := h.svc.Build(id); err != nil {
+		if errors.Is(err, ErrBuildCoalesced) {
+			c.JSON(http.StatusOK, gin.H{"ok": true, "message": "build coalesced into queued request"})
+			return
+		}
+		if errors.Is(err, ErrBuildQueueFull) {
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"error":   err.Error(),
+				"message": "panel is at concurrent-build capacity; retry shortly",
+			})
+			return
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "message": "build started"})
+}
+
+// StartProject POST /api/plugins/deploy/projects/:id/start
+func (h *Handler) StartProject(c *gin.Context) {
+	id, err := parseUintParam(c, "id")
+	if err != nil {
+		return
+	}
+	if err := h.svc.StartProject(id); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// StopProject POST /api/plugins/deploy/projects/:id/stop
+func (h *Handler) StopProject(c *gin.Context) {
+	id, err := parseUintParam(c, "id")
+	if err != nil {
+		return
+	}
+	if err := h.svc.StopProject(id); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// RollbackProject POST /api/plugins/deploy/projects/:id/rollback
+func (h *Handler) RollbackProject(c *gin.Context) {
+	id, err := parseUintParam(c, "id")
+	if err != nil {
+		return
+	}
+	var req struct {
+		BuildNum int `json:"build_num" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := h.svc.Rollback(id, req.BuildNum); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// GetDeployments GET /api/plugins/deploy/projects/:id/deployments
+func (h *Handler) GetDeployments(c *gin.Context) {
+	id, err := parseUintParam(c, "id")
+	if err != nil {
+		return
+	}
+	deployments, err := h.svc.GetDeployments(id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, deployments)
+}
+
+// GetBuildLog GET /api/plugins/deploy/projects/:id/logs
+func (h *Handler) GetBuildLog(c *gin.Context) {
+	id, err := parseUintParam(c, "id")
+	if err != nil {
+		return
+	}
+
+	logType := c.DefaultQuery("type", "build")
+	buildNum, _ := strconv.Atoi(c.DefaultQuery("build", "0"))
+
+	if logType == "runtime" {
+		lines, _ := strconv.Atoi(c.DefaultQuery("lines", "200"))
+		log, err := h.svc.GetRuntimeLog(id, lines)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"log": log, "type": "runtime"})
+		return
+	}
+
+	// Build log
+	if buildNum == 0 {
+		// Get current build number
+		project, err := h.svc.GetProject(id)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "project not found"})
+			return
+		}
+		buildNum = project.CurrentBuild
+	}
+
+	log, err := h.svc.GetBuildLog(id, buildNum)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "log not found"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"log": log, "type": "build", "build_num": buildNum})
+}
+
+// Webhook POST /api/plugins/deploy/webhook/:token
+func (h *Handler) Webhook(c *gin.Context) {
+	token := c.Param("token")
+
+	// Look up the project to check for HMAC secret.
+	var project Project
+	if err := h.svc.db.Where("webhook_token = ?", token).First(&project).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "project not found"})
+		return
+	}
+
+	// Verify webhook signature if the project has a webhook secret configured.
+	if project.WebhookSecret != "" {
+		// Decrypt the stored secret (it's AES-GCM encrypted).
+		secret, decErr := h.svc.decryptField(project.WebhookSecret)
+		if decErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to decrypt webhook secret"})
+			return
+		}
+
+		body, _ := io.ReadAll(io.LimitReader(c.Request.Body, 1024*1024)) // 1MB cap
+		// Restore body so downstream code can re-read it.
+		c.Request.Body = io.NopCloser(bytes.NewReader(body))
+
+		verified := false
+
+		// GitHub: HMAC-SHA256 signature in X-Hub-Signature-256 header.
+		if sig := c.GetHeader("X-Hub-Signature-256"); sig != "" {
+			mac := hmac.New(sha256.New, []byte(secret))
+			mac.Write(body)
+			expected := "sha256=" + hex.EncodeToString(mac.Sum(nil))
+			if hmac.Equal([]byte(sig), []byte(expected)) {
+				verified = true
+			}
+		}
+
+		// GitLab: plain secret token comparison in X-Gitlab-Token header.
+		if !verified {
+			if tok := c.GetHeader("X-Gitlab-Token"); tok != "" {
+				if subtle.ConstantTimeCompare([]byte(tok), []byte(secret)) == 1 {
+					verified = true
+				}
+			}
+		}
+
+		if !verified {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid or missing webhook signature"})
+			return
+		}
+	}
+
+	// Route GitHub pull_request events to the preview-deploy pipeline.
+	// GitHub sends `X-GitHub-Event: pull_request`. Other events (push,
+	// ping, issue_comment, etc.) fall through to the existing push path.
+	if c.GetHeader("X-GitHub-Event") == "pull_request" {
+		h.handlePullRequestWebhook(c, &project)
+		return
+	}
+
+	if !project.AutoDeploy {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "auto-deploy is disabled"})
+		return
+	}
+
+	if err := h.svc.Build(project.ID); err != nil {
+		if errors.Is(err, ErrBuildCoalesced) {
+			c.JSON(http.StatusOK, gin.H{"ok": true, "message": "build coalesced into queued request"})
+			return
+		}
+		if errors.Is(err, ErrBuildQueueFull) {
+			// 503 makes GitHub's webhook delivery retry per its
+			// exponential backoff schedule — exactly what we want
+			// when the panel is overloaded.
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"error":   err.Error(),
+				"message": "panel is at concurrent-build capacity; webhook will retry",
+			})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "message": "build triggered"})
+}
+
+// handlePullRequestWebhook processes GitHub `pull_request` webhook events
+// for the preview deploy feature. Events of interest:
+//   - opened / reopened / synchronize → create or rebuild the preview env
+//   - closed                          → tear down the preview env
+//
+// Other pull_request actions (labeled, assigned, review_requested, …) are
+// acknowledged with 200 but ignored; GitHub retries on non-2xx so we must
+// not return an error for "uninteresting" action values.
+func (h *Handler) handlePullRequestWebhook(c *gin.Context, project *Project) {
+	if !project.PreviewEnabled {
+		c.JSON(http.StatusOK, gin.H{"ok": true, "message": "preview deployments disabled for this project"})
+		return
+	}
+
+	var payload struct {
+		Action      string `json:"action"`
+		Number      int    `json:"number"`
+		PullRequest struct {
+			Head struct {
+				Ref  string `json:"ref"`
+				SHA  string `json:"sha"`
+				Repo struct {
+					FullName string `json:"full_name"`
+					CloneURL string `json:"clone_url"` // v0.19: needed for fork PR clone
+				} `json:"repo"`
+			} `json:"head"`
+			Base struct {
+				Repo struct {
+					FullName string `json:"full_name"`
+				} `json:"repo"`
+			} `json:"base"`
+		} `json:"pull_request"`
+	}
+	if err := c.ShouldBindJSON(&payload); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid pull_request payload: " + err.Error()})
+		return
+	}
+
+	switch payload.Action {
+	case "opened", "reopened", "synchronize":
+		// PB-R5-H1: reject fork PRs explicitly. The clone path uses
+		// `project.GitURL` (the base repo) + `head.ref`, but a fork
+		// PR's head branch only exists in the fork repo. Cloning
+		// `project.GitURL` at the fork's branch name would either fail
+		// or pull stale base-repo content. Detecting and rejecting
+		// here gives the admin a clear error in their PR thread (via
+		// GitHub's "this delivery failed" UI) instead of a silent
+		// build failure with a confusing git error.
+		//
+		// Cross-repo preview support is intentionally out of v0.15
+		// scope — it requires (a) a separate clone URL per preview,
+		// (b) a security review of running untrusted fork code with
+		// the project's secrets, and (c) UI to gate fork builds
+		// behind admin approval (GitHub Actions / Vercel / Netlify
+		// model). Tracked for v0.16+.
+		head := payload.PullRequest.Head.Repo.FullName
+		base := payload.PullRequest.Base.Repo.FullName
+		// PB-R6-L1 defensive: GitHub always populates these on real
+		// pull_request events; missing means the payload is malformed
+		// or a custom client is poking at us. Reject explicitly so the
+		// downstream clone doesn't fall back to head.ref alone.
+		if head == "" || base == "" {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "pull_request payload missing head.repo.full_name or base.repo.full_name",
+			})
+			return
+		}
+		if payload.PullRequest.Head.Ref == "" {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "pull_request payload missing head.ref",
+			})
+			return
+		}
+		// v019-R8-H1: head.sha is REQUIRED. The R4-H3 force-push
+		// approval reset ("if headSHA != preview.ApprovedHeadSHA")
+		// silently no-ops when headSHA is empty — an attacker-
+		// crafted (or malformed-bot) webhook without head.sha could
+		// then push new code under a previously-approved fork PR
+		// and bypass the re-approval fence. Reject empty head.sha
+		// at the boundary.
+		if payload.PullRequest.Head.SHA == "" {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "pull_request payload missing head.sha",
+			})
+			return
+		}
+		// v0.19: fork PR support gated by project setting. Default
+		// (AcceptForkPRPreviews=false) preserves v0.14-v0.18 reject
+		// behaviour. When opted in, the fork PR builds + runs but
+		// the public Caddy host stays gated until admin approves
+		// (Vercel-style — see preview.go runPreview).
+		isForkPR := head != base
+		if isForkPR && !project.AcceptForkPRPreviews {
+			c.JSON(http.StatusOK, gin.H{
+				"ok":      true,
+				"message": "fork PR previews are disabled for this project (enable via accept_fork_pr_previews)",
+				"head":    head,
+				"base":    base,
+			})
+			return
+		}
+		// v019-R1-2 + R4-M1 fix: head.repo.clone_url is webhook-supplied
+		// and will be auth'd against by the GitHub installation token
+		// when AuthMethod is github_app/github_oauth. Reject anything
+		// that isn't a github.com HTTPS URL (R4-M1: explicit https
+		// scheme check — extractHost accepts http too) AND verify the
+		// path matches head.repo.full_name (extra defense against
+		// path injection like /a@github.com/...).
+		if isForkPR {
+			cloneURL := payload.PullRequest.Head.Repo.CloneURL
+			if cloneURL == "" {
+				c.JSON(http.StatusBadRequest, gin.H{
+					"error": "fork PR webhook missing head.repo.clone_url",
+				})
+				return
+			}
+			if !strings.HasPrefix(cloneURL, "https://github.com/") {
+				c.JSON(http.StatusBadRequest, gin.H{
+					"error": "fork PR clone_url must be a github.com HTTPS URL; got " + cloneURL,
+				})
+				return
+			}
+			// Path must match head.repo.full_name (with optional .git
+			// suffix) so a malicious payload can't claim full_name=
+			// "owner/repo" but clone_url=https://github.com/other/repo.
+			expectedPath := "https://github.com/" + head
+			if cloneURL != expectedPath && cloneURL != expectedPath+".git" {
+				c.JSON(http.StatusBadRequest, gin.H{
+					"error": "fork PR clone_url path doesn't match head.repo.full_name",
+				})
+				return
+			}
+		}
+		preview, err := h.svc.preview.CreatePreviewWithFork(
+			project.ID, payload.Number, payload.PullRequest.Head.Ref,
+			payload.PullRequest.Head.SHA,
+			isForkPR, head, payload.PullRequest.Head.Repo.CloneURL,
+		)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"ok":         true,
+			"preview_id": preview.ID,
+			"domain":     preview.Domain,
+			"status":     preview.Status,
+		})
+	case "closed":
+		// Find the preview (by project + PR number) and tear it down.
+		// L1 fix: return the SAME response whether a preview existed or
+		// not, so a caller replaying signed webhooks can't enumerate which
+		// PR numbers had previews by diffing response bodies. (Signature
+		// verification gates writes, but the HMAC secret could leak and
+		// we still don't want enumeration to be a freebie.)
+		var preview PreviewDeployment
+		if err := h.svc.db.Where("project_id = ? AND pr_number = ?", project.ID, payload.Number).First(&preview).Error; err == nil {
+			if err := h.svc.preview.DeletePreview(preview.ID); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true, "message": "close processed"})
+	default:
+		// Uninteresting action — ack so GitHub stops retrying.
+		c.JSON(http.StatusOK, gin.H{"ok": true, "message": "action ignored: " + payload.Action})
+	}
+}
+
+// DetectFramework GET /api/plugins/deploy/detect
+func (h *Handler) DetectFramework(c *gin.Context) {
+	url := c.Query("url")
+	branch := c.DefaultQuery("branch", "main")
+	if url == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "url is required"})
+		return
+	}
+
+	preset, err := DetectFrameworkFromURL(url, branch)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, preset)
+}
+
+// NixpacksStatus GET /api/plugins/deploy/builders/nixpacks/status
+// Returns {installed: bool, version: string, path: string}.
+// Used by ProjectCreate / ProjectDetail to show an install button
+// when build_type=nixpacks but the CLI isn't on PATH.
+func (h *Handler) NixpacksStatus(c *gin.Context) {
+	c.JSON(http.StatusOK, CheckNixpacks())
+}
+
+// InstallNixpacks POST /api/plugins/deploy/builders/nixpacks/install
+// (admin) Streams the official installer's output via SSE. The
+// stream ends with `event: done` (success) or `event: error`
+// (failure). Mirrors backup plugin's InstallKopia contract so the
+// frontend SSE consumer is reusable.
+func (h *Handler) InstallNixpacks(c *gin.Context) {
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("X-Accel-Buffering", "no")
+	c.Writer.Flush()
+
+	writeSSE := func(data string) {
+		fmt.Fprintf(c.Writer, "data: %s\n\n", data)
+		c.Writer.Flush()
+	}
+	writeEvent := func(event, data string) {
+		fmt.Fprintf(c.Writer, "event: %s\ndata: %s\n\n", event, data)
+		c.Writer.Flush()
+	}
+	InstallNixpacks(c.Request.Context(), writeSSE, writeEvent)
+}
+
+// GetFrameworks GET /api/plugins/deploy/frameworks
+func (h *Handler) GetFrameworks(c *gin.Context) {
+	presets := make([]FrameworkPreset, 0, len(frameworkPresets))
+	for _, p := range frameworkPresets {
+		presets = append(presets, p)
+	}
+	c.JSON(http.StatusOK, presets)
+}
+
+// ListPreviews GET /api/plugins/deploy/projects/:id/previews
+// Returns the active + historical preview deployments for a project. Used
+// by the Project detail page to render a "Previews" tab.
+func (h *Handler) ListPreviews(c *gin.Context) {
+	id, err := parseUintParam(c, "id")
+	if err != nil {
+		return
+	}
+	previews, err := h.svc.preview.ListByProject(id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"previews": previews})
+}
+
+// ApprovePreview POST /api/plugins/deploy/previews/:previewId/approve (admin)
+// v0.19: lifts the gate on a fork-PR preview so its Caddy host is
+// created and the public URL becomes reachable.
+func (h *Handler) ApprovePreview(c *gin.Context) {
+	id, err := parseUintParam(c, "previewId")
+	if err != nil {
+		return
+	}
+	// Admin user ID for audit. Pull from JWT-set context (admin
+	// middleware injected). Falls back to 0 if absent — still records
+	// the approval but without an audit trail user.
+	var userID uint
+	if v, ok := c.Get("user_id"); ok {
+		if u, ok := v.(uint); ok {
+			userID = u
+		}
+	}
+	if err := h.svc.preview.ApprovePreview(id, userID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "preview approved"})
+}
+
+// RevokePreview POST /api/plugins/deploy/previews/:previewId/revoke (admin)
+// v0.19: clears approval + tears down the Caddy host. Container is
+// kept running for inspection.
+func (h *Handler) RevokePreview(c *gin.Context) {
+	id, err := parseUintParam(c, "previewId")
+	if err != nil {
+		return
+	}
+	if err := h.svc.preview.RevokePreview(id); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "preview approval revoked"})
+}
+
+// DeletePreview DELETE /api/plugins/deploy/previews/:previewId (admin)
+// Manually tears down a preview (Caddy host + container + DB row). Called
+// by the UI "Delete" button on the Previews tab. Automatic teardown on
+// PR close goes through the webhook path and doesn't hit this endpoint.
+func (h *Handler) DeletePreview(c *gin.Context) {
+	id, err := parseUintParam(c, "previewId")
+	if err != nil {
+		return
+	}
+	if err := h.svc.preview.DeletePreview(id); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "preview deleted"})
+}
+
+// GetPreviewLog GET /api/plugins/deploy/previews/:previewId/log
+// Returns the static contents of the preview's build.log. Used by the
+// Previews tab when streaming isn't requested (or as fallback after the
+// stream closes).
+//
+// Security: previewId is validated to exist as a row in our DB; the file
+// path is then derived from the validated integer ID (no user-controlled
+// path component reaches the filesystem). Path traversal isn't possible.
+func (h *Handler) GetPreviewLog(c *gin.Context) {
+	id, err := parseUintParam(c, "previewId")
+	if err != nil {
+		return
+	}
+	var preview PreviewDeployment
+	if err := h.svc.db.Select("id").First(&preview, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "preview not found"})
+		return
+	}
+	content, err := h.svc.preview.ReadBuildLog(id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.Data(http.StatusOK, "text/plain; charset=utf-8", content)
+}
+
+// StreamPreviewLog GET /api/plugins/deploy/previews/:previewId/log/stream
+// Server-Sent Events stream of the build log. Sends the existing content
+// as the first events, then tails the file until the build finishes
+// (status leaves "building"/"pending") or the client disconnects.
+//
+// Event format:
+//
+//	event: log
+//	data: <base64-encoded log line(s)>
+//
+//	event: status
+//	data: <preview status>
+//
+//	event: done
+//	data: <final status>
+func (h *Handler) StreamPreviewLog(c *gin.Context) {
+	id, err := parseUintParam(c, "previewId")
+	if err != nil {
+		return
+	}
+	var preview PreviewDeployment
+	if err := h.svc.db.Select("id").First(&preview, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "preview not found"})
+		return
+	}
+	h.svc.preview.StreamBuildLog(c, id)
+}
+
+// GetWebhookInfo GET /api/plugins/deploy/projects/:id/webhook (admin only)
+// Returns the webhook token so the admin can set up Git hooks.
+func (h *Handler) GetWebhookInfo(c *gin.Context) {
+	id, err := parseUintParam(c, "id")
+	if err != nil {
+		return
+	}
+	var project Project
+	if err := h.svc.db.Select("id, webhook_token").First(&project, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "project not found"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"webhook_token": project.WebhookToken})
+}
+
+// ClearCache DELETE /api/plugins/deploy/projects/:id/cache
+func (h *Handler) ClearCache(c *gin.Context) {
+	id, err := parseUintParam(c, "id")
+	if err != nil {
+		return
+	}
+	if err := h.svc.ClearCache(id); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// GetCacheInfo GET /api/plugins/deploy/projects/:id/cache
+func (h *Handler) GetCacheInfo(c *gin.Context) {
+	id, err := parseUintParam(c, "id")
+	if err != nil {
+		return
+	}
+	size := h.svc.GetCacheSize(id)
+	c.JSON(http.StatusOK, gin.H{"size": size})
+}
+
+// SuggestEnv GET /api/plugins/deploy/suggest-env?framework=nextjs
+func (h *Handler) SuggestEnv(c *gin.Context) {
+	framework := c.Query("framework")
+	if framework == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "framework is required"})
+		return
+	}
+	suggestions := GetEnvSuggestions(framework)
+	if suggestions == nil {
+		suggestions = []EnvVarSuggestion{}
+	}
+	c.JSON(http.StatusOK, suggestions)
+}
+
+// CloneEnvVars POST /api/plugins/deploy/projects/:id/clone-env
+func (h *Handler) CloneEnvVars(c *gin.Context) {
+	targetID, err := parseUintParam(c, "id")
+	if err != nil {
+		return
+	}
+	var req struct {
+		SourceID uint `json:"source_id" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := h.svc.CloneEnvVars(req.SourceID, targetID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+// ---- CronJob Handlers ----
+
+// ListCronJobs GET /api/plugins/deploy/projects/:id/crons
+func (h *Handler) ListCronJobs(c *gin.Context) {
+	id, err := parseUintParam(c, "id")
+	if err != nil {
+		return
+	}
+	jobs, err := h.svc.ListCronJobs(id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, jobs)
+}
+
+// CreateCronJob POST /api/plugins/deploy/projects/:id/crons
+func (h *Handler) CreateCronJob(c *gin.Context) {
+	id, err := parseUintParam(c, "id")
+	if err != nil {
+		return
+	}
+	var req struct {
+		Name     string `json:"name" binding:"required"`
+		Schedule string `json:"schedule" binding:"required"`
+		Command  string `json:"command" binding:"required"`
+		Enabled  *bool  `json:"enabled"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	enabled := true
+	if req.Enabled != nil {
+		enabled = *req.Enabled
+	}
+	job := &CronJob{
+		ProjectID: id,
+		Name:      req.Name,
+		Schedule:  req.Schedule,
+		Command:   req.Command,
+		Enabled:   enabled,
+	}
+	if err := h.svc.CreateCronJob(job); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusCreated, job)
+}
+
+// UpdateCronJob PUT /api/plugins/deploy/projects/:id/crons/:cronId
+func (h *Handler) UpdateCronJob(c *gin.Context) {
+	id, err := parseUintParam(c, "id")
+	if err != nil {
+		return
+	}
+	cronID, err := strconv.ParseUint(c.Param("cronId"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid cronId"})
+		return
+	}
+	var req map[string]interface{}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	allowed := map[string]bool{"name": true, "schedule": true, "command": true, "enabled": true}
+	filtered := make(map[string]interface{})
+	for k, v := range req {
+		if allowed[k] {
+			filtered[k] = v
+		}
+	}
+	if err := h.svc.UpdateCronJob(id, uint(cronID), filtered); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// DeleteCronJob DELETE /api/plugins/deploy/projects/:id/crons/:cronId
+func (h *Handler) DeleteCronJob(c *gin.Context) {
+	id, err := parseUintParam(c, "id")
+	if err != nil {
+		return
+	}
+	cronID, err := strconv.ParseUint(c.Param("cronId"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid cronId"})
+		return
+	}
+	if err := h.svc.DeleteCronJob(id, uint(cronID)); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// ---- ExtraProcess Handlers ----
+
+// ListExtraProcesses GET /api/plugins/deploy/projects/:id/processes
+func (h *Handler) ListExtraProcesses(c *gin.Context) {
+	id, err := parseUintParam(c, "id")
+	if err != nil {
+		return
+	}
+	procs, err := h.svc.ListExtraProcesses(id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, procs)
+}
+
+// CreateExtraProcess POST /api/plugins/deploy/projects/:id/processes
+func (h *Handler) CreateExtraProcess(c *gin.Context) {
+	id, err := parseUintParam(c, "id")
+	if err != nil {
+		return
+	}
+	var req struct {
+		Name      string `json:"name" binding:"required"`
+		Command   string `json:"command" binding:"required"`
+		Instances int    `json:"instances"`
+		Enabled   *bool  `json:"enabled"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	instances := req.Instances
+	if instances <= 0 {
+		instances = 1
+	}
+	enabled := true
+	if req.Enabled != nil {
+		enabled = *req.Enabled
+	}
+	proc := &ExtraProcess{
+		ProjectID: id,
+		Name:      req.Name,
+		Command:   req.Command,
+		Instances: instances,
+		Enabled:   enabled,
+	}
+	if err := h.svc.CreateExtraProcess(proc); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusCreated, proc)
+}
+
+// UpdateExtraProcess PUT /api/plugins/deploy/projects/:id/processes/:procId
+func (h *Handler) UpdateExtraProcess(c *gin.Context) {
+	id, err := parseUintParam(c, "id")
+	if err != nil {
+		return
+	}
+	procID, err := strconv.ParseUint(c.Param("procId"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid procId"})
+		return
+	}
+	var req map[string]interface{}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	allowed := map[string]bool{"name": true, "command": true, "instances": true, "enabled": true}
+	filtered := make(map[string]interface{})
+	for k, v := range req {
+		if allowed[k] {
+			filtered[k] = v
+		}
+	}
+	if err := h.svc.UpdateExtraProcess(id, uint(procID), filtered); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// DeleteExtraProcess DELETE /api/plugins/deploy/projects/:id/processes/:procId
+func (h *Handler) DeleteExtraProcess(c *gin.Context) {
+	id, err := parseUintParam(c, "id")
+	if err != nil {
+		return
+	}
+	procID, err := strconv.ParseUint(c.Param("procId"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid procId"})
+		return
+	}
+	if err := h.svc.DeleteExtraProcess(id, uint(procID)); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// RestartExtraProcess POST /api/plugins/deploy/projects/:id/processes/:procId/restart
+func (h *Handler) RestartExtraProcess(c *gin.Context) {
+	id, err := parseUintParam(c, "id")
+	if err != nil {
+		return
+	}
+	procID, err := strconv.ParseUint(c.Param("procId"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid procId"})
+		return
+	}
+	if err := h.svc.RestartExtraProcess(id, uint(procID)); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// ── GitHub OAuth Handlers ──
+
+// GetGitHubConfig GET /api/plugins/deploy/github/config
+func (h *Handler) GetGitHubConfig(c *gin.Context) {
+	c.JSON(http.StatusOK, h.svc.ghOAuth.GetConfig())
+}
+
+// SaveGitHubConfig PUT /api/plugins/deploy/github/config
+func (h *Handler) SaveGitHubConfig(c *gin.Context) {
+	var cfg GitHubAppConfig
+	if err := c.ShouldBindJSON(&cfg); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := h.svc.ghOAuth.SaveConfig(cfg); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// GitHubAuthorize GET /api/plugins/deploy/github/authorize
+func (h *Handler) GitHubAuthorize(c *gin.Context) {
+	// Build callback URL from the current request.
+	scheme := "https"
+	if c.Request.TLS == nil {
+		if fwd := c.GetHeader("X-Forwarded-Proto"); fwd != "" {
+			scheme = fwd
+		} else {
+			scheme = "http"
+		}
+	}
+	callbackURL := scheme + "://" + c.Request.Host + "/api/plugins/deploy/github/callback"
+
+	authorizeURL, err := h.svc.ghOAuth.GetAuthorizeURL(callbackURL)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"url": authorizeURL})
+}
+
+// GitHubCallback GET /api/plugins/deploy/github/callback (PUBLIC — browser redirect from GitHub)
+func (h *Handler) GitHubCallback(c *gin.Context) {
+	state := c.Query("state")
+	code := c.Query("code")
+	installIDStr := c.Query("installation_id")
+
+	// Validate CSRF state.
+	if state == "" || !h.svc.ghOAuth.ValidateState(state) {
+		c.String(http.StatusBadRequest, "Invalid or expired state parameter")
+		return
+	}
+
+	installID, _ := strconv.ParseInt(installIDStr, 10, 64)
+
+	install, err := h.svc.ghOAuth.HandleCallback(code, installID)
+	if err != nil {
+		h.svc.logger.Error("GitHub OAuth callback failed", "err", err)
+		c.String(http.StatusInternalServerError, "GitHub OAuth error, please try again")
+		return
+	}
+
+	// Redirect browser back to the panel frontend.
+	redirectURL := "/#/deploy/create?github_connected=1"
+	if install != nil {
+		redirectURL += "&installation_id=" + strconv.FormatUint(uint64(install.ID), 10)
+	}
+	c.Redirect(http.StatusFound, redirectURL)
+}
+
+// ListGitHubInstallations GET /api/plugins/deploy/github/installations
+func (h *Handler) ListGitHubInstallations(c *gin.Context) {
+	installations, err := h.svc.ghOAuth.ListInstallations()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, installations)
+}
+
+// DeleteGitHubInstallation DELETE /api/plugins/deploy/github/installations/:id
+func (h *Handler) DeleteGitHubInstallation(c *gin.Context) {
+	id, err := parseUintParam(c, "id")
+	if err != nil {
+		return
+	}
+	if err := h.svc.ghOAuth.DeleteInstallation(id); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// ListGitHubRepos GET /api/plugins/deploy/github/installations/:id/repos
+func (h *Handler) ListGitHubRepos(c *gin.Context) {
+	id, err := parseUintParam(c, "id")
+	if err != nil {
+		return
+	}
+
+	// Look up the installation to get the GitHub installation_id.
+	var install GitHubInstallation
+	if err := h.svc.db.First(&install, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "installation not found"})
+		return
+	}
+
+	repos, err := h.svc.ghOAuth.ListRepos(install.InstallationID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, repos)
+}
+
+func parseUintParam(c *gin.Context, name string) (uint, error) {
+	v, err := strconv.ParseUint(c.Param(name), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid " + name})
+		return 0, err
+	}
+	return uint(v), nil
+}
