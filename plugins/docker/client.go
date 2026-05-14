@@ -383,7 +383,7 @@ type RunPortMapping struct {
 	HostPort      string `json:"host_port"`
 	ContainerPort string `json:"container_port"`
 	Protocol      string `json:"protocol"` // tcp|udp
-	HostIP        string `json:"host_ip"`  // default: 127.0.0.1 (loopback)
+	HostIP        string `json:"host_ip"`  // default: 0.0.0.0 (all interfaces)
 }
 
 // RunVolumeMapping describes a single volume mount for RunContainer.
@@ -410,7 +410,7 @@ func (c *Client) RunContainer(ctx context.Context, req *RunContainerRequest) (st
 		exposedPorts[containerPort] = struct{}{}
 		hostIP := p.HostIP
 		if hostIP == "" {
-			hostIP = "127.0.0.1" // Default to loopback — use reverse proxy for public access.
+			hostIP = "0.0.0.0"
 		}
 		portBindings[containerPort] = []nat.PortBinding{
 			{HostIP: hostIP, HostPort: p.HostPort},
