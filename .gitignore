@@ -1,0 +1,53 @@
+# Dependencies
+node_modules/
+web/node_modules/
+
+# Frontend build output
+dist/
+web/dist/
+web/.vite/
+
+# Go build output
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+bin/
+build/
+coverage/
+coverage.out
+
+# Local environment and config
+.env
+.env.*
+!.env.example
+*.env
+pdai.env
+config.ini
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Editor and IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary files
+tmp/
+temp/
+.cache/
