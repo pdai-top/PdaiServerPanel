@@ -19,6 +19,8 @@ bin/
 build/
 coverage/
 coverage.out
+.gocache/
+.gomodcache/
 
 # Local environment and config
 .env
