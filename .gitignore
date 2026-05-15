@@ -53,3 +53,5 @@ desktop.ini
 tmp/
 temp/
 .cache/
+
+.soloncode/
