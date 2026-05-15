@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	dbplugin "github.com/pdai/pdai/plugins/database"
 	"github.com/robfig/cron/v3"
 	"gorm.io/gorm"
 )
@@ -731,8 +732,116 @@ func (s *Service) backupDocker(parentCtx context.Context, destDir string, snapID
 	s.addLog(snapID, "info", fmt.Sprintf("Docker volumes backed up: %d", volumes))
 }
 
-// backupDatabases performs database dumps for running database instances.
+// backupDatabases performs database dumps for all managed database instances.
 func (s *Service) backupDatabases(parentCtx context.Context, destDir string, snapID uint) {
+	dbDir := filepath.Join(destDir, "databases")
+	os.MkdirAll(dbDir, 0755)
+
+	var instances []dbplugin.Instance
+	if err := s.db.Order("id ASC").Find(&instances).Error; err != nil {
+		s.addLog(snapID, "warn", "Failed to list database instances: "+err.Error())
+		return
+	}
+
+	count := 0
+	for i := range instances {
+		inst := &instances[i]
+		if inst.Engine == dbplugin.EngineRedis {
+			s.addLog(snapID, "info", fmt.Sprintf("Skip Redis backup for %s", inst.Name))
+			continue
+		}
+		pingCtx, pingCancel := context.WithTimeout(parentCtx, 5*time.Second)
+		if err := dbplugin.NewDBClient().Ping(pingCtx, inst); err != nil {
+			pingCancel()
+			s.addLog(snapID, "warn", fmt.Sprintf("Skip database backup for %s: %v", inst.Name, err))
+			continue
+		}
+		pingCancel()
+
+		dumpCmd, dumpFile, err := databaseDumpCommand(parentCtx, dbDir, inst)
+		if err != nil {
+			s.addLog(snapID, "warn", fmt.Sprintf("Prepare dump for %s failed: %v", inst.Name, err))
+			continue
+		}
+
+		outFile, fileErr := os.Create(dumpFile)
+		if fileErr != nil {
+			s.addLog(snapID, "warn", fmt.Sprintf("Create dump file %s failed: %v", dumpFile, fileErr))
+			continue
+		}
+
+		dumpCmd.Stdout = outFile
+		var stderrBuf strings.Builder
+		dumpCmd.Stderr = &stderrBuf
+		err = dumpCmd.Run()
+		outFile.Close()
+		if err != nil {
+			errDetail := strings.TrimSpace(stderrBuf.String())
+			if len(errDetail) > 512 {
+				errDetail = errDetail[:512]
+			}
+			s.addLog(snapID, "warn", fmt.Sprintf("Database dump %s failed: %v - %s", inst.Name, err, errDetail))
+			os.Remove(dumpFile)
+			continue
+		}
+		count++
+	}
+
+	s.addLog(snapID, "info", fmt.Sprintf("Database dumps completed: %d", count))
+}
+
+func databaseDumpCommand(parentCtx context.Context, dbDir string, inst *dbplugin.Instance) (*exec.Cmd, string, error) {
+	safeName := sanitizeBackupName(inst.Name)
+	if safeName == "" {
+		safeName = fmt.Sprintf("db-%d", inst.ID)
+	}
+	dumpFile := filepath.Join(dbDir, safeName+".sql")
+
+	switch inst.Engine {
+	case dbplugin.EngineMySQL, dbplugin.EngineMariaDB:
+		if inst.IsRemote() {
+			cmd := exec.CommandContext(parentCtx, "mysqldump", "--all-databases", "-h", inst.DBHost(), "-P", fmt.Sprintf("%d", inst.Port), "-u", inst.DBUsername())
+			cmd.Env = append(os.Environ(), "MYSQL_PWD="+inst.RootPassword)
+			return cmd, dumpFile, nil
+		}
+		cmd := exec.CommandContext(parentCtx, "docker", "exec", "-e", "MYSQL_PWD="+inst.RootPassword, inst.ContainerName, "mysqldump", "--all-databases", "-u", inst.DBUsername())
+		return cmd, dumpFile, nil
+	case dbplugin.EnginePostgres:
+		if inst.IsRemote() {
+			cmd := exec.CommandContext(parentCtx, "pg_dumpall", "-h", inst.DBHost(), "-p", fmt.Sprintf("%d", inst.Port), "-U", inst.DBUsername())
+			cmd.Env = append(os.Environ(), "PGPASSWORD="+inst.RootPassword, "PGSSLMODE="+inst.DBSSLMode())
+			return cmd, dumpFile, nil
+		}
+		cmd := exec.CommandContext(parentCtx, "docker", "exec", "-e", "PGPASSWORD="+inst.RootPassword, "-e", "PGSSLMODE="+inst.DBSSLMode(), inst.ContainerName, "pg_dumpall", "-U", inst.DBUsername())
+		return cmd, dumpFile, nil
+	default:
+		return nil, "", fmt.Errorf("unsupported engine: %s", inst.Engine)
+	}
+}
+
+func sanitizeBackupName(name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '-' || r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('-')
+		}
+	}
+	out := strings.Trim(b.String(), "-_")
+	for strings.Contains(out, "--") {
+		out = strings.ReplaceAll(out, "--", "-")
+	}
+	return out
+}
+
+func (s *Service) backupDatabasesLegacy(parentCtx context.Context, destDir string, snapID uint) {
 	dbDir := filepath.Join(destDir, "databases")
 	os.MkdirAll(dbDir, 0755)
 

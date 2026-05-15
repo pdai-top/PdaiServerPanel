@@ -264,6 +264,7 @@ export const databaseAPI = {
     startInstance: (id) => api.post(`/plugins/database/instances/${id}/start`),
     stopInstance: (id) => api.post(`/plugins/database/instances/${id}/stop`),
     restartInstance: (id) => api.post(`/plugins/database/instances/${id}/restart`),
+    testConnection: (id) => api.post(`/plugins/database/instances/${id}/test`),
     instanceLogs: (id, tail) => api.get(`/plugins/database/instances/${id}/logs`, { params: { tail } }),
     connectionInfo: (id) => api.get(`/plugins/database/instances/${id}/connection`),
     rootPassword: (id) => api.get(`/plugins/database/instances/${id}/password`),

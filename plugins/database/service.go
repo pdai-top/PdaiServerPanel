@@ -16,6 +16,11 @@ import (
 	"gorm.io/gorm"
 )
 
+const (
+	instanceSourceLocal  = "local"
+	instanceSourceRemote = "remote"
+)
+
 // Service implements the business logic for database instance management.
 type Service struct {
 	db      *gorm.DB
@@ -70,6 +75,7 @@ func (s *Service) CreateInstance(req *CreateInstanceRequest) (*Instance, error) 
 	if version == "" {
 		version = engineInfo.Default
 	}
+	source := normalizeInstanceSource(req.Source)
 
 	// Check name uniqueness.
 	var count int64
@@ -84,13 +90,15 @@ func (s *Service) CreateInstance(req *CreateInstanceRequest) (*Instance, error) 
 		return nil, fmt.Errorf("instance name must contain at least one letter or digit")
 	}
 
-	// Check slug collision: different names like "Foo!" and "Foo?" map to the same
-	// container name and data directory, causing cross-interference.
-	var existingInstances []Instance
-	s.db.Select("name").Find(&existingInstances)
-	for _, ex := range existingInstances {
-		if sanitizeName(ex.Name) == safeName {
-			return nil, fmt.Errorf("instance name %q conflicts with existing instance %q (same container name)", req.Name, ex.Name)
+	if source == instanceSourceLocal {
+		// Check slug collision: different names like "Foo!" and "Foo?" map to the same
+		// container name and data directory, causing cross-interference.
+		var existingInstances []Instance
+		s.db.Select("name").Find(&existingInstances)
+		for _, ex := range existingInstances {
+			if sanitizeName(ex.Name) == safeName {
+				return nil, fmt.Errorf("instance name %q conflicts with existing instance %q (same container name)", req.Name, ex.Name)
+			}
 		}
 	}
 
@@ -103,11 +111,13 @@ func (s *Service) CreateInstance(req *CreateInstanceRequest) (*Instance, error) 
 	if port < 1024 || port > 65535 {
 		return nil, fmt.Errorf("port must be between 1024 and 65535, got %d", port)
 	}
-	// Check for port conflicts with existing instances.
-	var portConflict int64
-	s.db.Model(&Instance{}).Where("port = ?", port).Count(&portConflict)
-	if portConflict > 0 {
-		return nil, fmt.Errorf("port %d is already in use by another instance", port)
+	if source == instanceSourceLocal {
+		// Check for port conflicts with existing instances.
+		var portConflict int64
+		s.db.Model(&Instance{}).Where("source <> ? AND port = ?", instanceSourceRemote, port).Count(&portConflict)
+		if portConflict > 0 {
+			return nil, fmt.Errorf("port %d is already in use by another instance", port)
+		}
 	}
 
 	// Memory limit — default 0.5g.
@@ -117,6 +127,13 @@ func (s *Service) CreateInstance(req *CreateInstanceRequest) (*Instance, error) 
 	}
 
 	containerName := "pdai-db-" + safeName
+	host := strings.TrimSpace(req.Host)
+	if source == instanceSourceRemote {
+		if host == "" {
+			return nil, fmt.Errorf("host is required for remote database")
+		}
+		containerName = ""
+	}
 
 	// Apply postgres workload preset (no-op for other engines or empty preset).
 	cfg, presetID, err := resolveTuningPreset(req, memLimit)
@@ -137,13 +154,33 @@ func (s *Service) CreateInstance(req *CreateInstanceRequest) (*Instance, error) 
 		Engine:        req.Engine,
 		Version:       version,
 		Status:        "stopped",
+		Source:        source,
+		Host:          host,
 		Port:          port,
+		Username:      strings.TrimSpace(req.Username),
 		RootPassword:  req.RootPassword,
-		DataDir:       filepath.Join(s.dataDir, "instances", sanitizeName(req.Name)),
+		SSLMode:       normalizeSSLMode(req.SSLMode),
+		DataDir:       "",
 		ContainerName: containerName,
 		MemoryLimit:   memLimit,
 		TuningPreset:  presetID,
 		Config:        configJSON,
+	}
+	if source == instanceSourceLocal {
+		inst.DataDir = filepath.Join(s.dataDir, "instances", sanitizeName(req.Name))
+	}
+
+	if source == instanceSourceRemote {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := NewDBClient().Ping(ctx, inst); err != nil {
+			return nil, fmt.Errorf("remote database connection failed: %w", err)
+		}
+		inst.Status = "running"
+		if err := s.db.Create(inst).Error; err != nil {
+			return nil, fmt.Errorf("create instance record: %w", err)
+		}
+		return s.GetInstance(inst.ID)
 	}
 
 	// Create data directory.
@@ -200,6 +237,16 @@ func (s *Service) CreateInstanceStream(req *CreateInstanceRequest, progressCb fu
 	version := req.Version
 	if version == "" {
 		version = engineInfo.Default
+	}
+
+	if normalizeInstanceSource(req.Source) == instanceSourceRemote {
+		progressCb("Testing remote database connection...")
+		inst, err := s.CreateInstance(req)
+		if err != nil {
+			return nil, err
+		}
+		progressCb("Remote database registered.")
+		return inst, nil
 	}
 
 	var count int64
@@ -343,6 +390,12 @@ func (s *Service) DeleteInstance(id uint) error {
 		return err
 	}
 
+	if inst.IsRemote() {
+		s.db.Where("instance_id = ?", id).Delete(&Database{})
+		s.db.Where("instance_id = ?", id).Delete(&DatabaseUser{})
+		return s.db.Delete(&Instance{}, id).Error
+	}
+
 	// Stop and remove containers + volumes — if this fails, keep the instance visible.
 	if err := s.runCompose(inst.DataDir, "down", "--volumes", "--remove-orphans"); err != nil {
 		s.logger.Error("compose down failed", "instance", inst.Name, "err", err)
@@ -367,6 +420,9 @@ func (s *Service) StartInstance(id uint) error {
 	if err != nil {
 		return err
 	}
+	if inst.IsRemote() {
+		return s.TestConnection(id)
+	}
 	return s.startInstance(inst)
 }
 
@@ -380,6 +436,9 @@ func (s *Service) StopInstance(id uint) error {
 	if err != nil {
 		return err
 	}
+	if inst.IsRemote() {
+		return fmt.Errorf("remote database lifecycle is managed outside the panel")
+	}
 	return s.runCompose(inst.DataDir, "down")
 }
 
@@ -389,6 +448,9 @@ func (s *Service) RestartInstance(id uint) error {
 	if err != nil {
 		return err
 	}
+	if inst.IsRemote() {
+		return fmt.Errorf("remote database lifecycle is managed outside the panel")
+	}
 	return s.runCompose(inst.DataDir, "restart")
 }
 
@@ -397,6 +459,9 @@ func (s *Service) InstanceLogs(id uint, tail string) (string, error) {
 	inst, err := s.GetInstance(id)
 	if err != nil {
 		return "", err
+	}
+	if inst.IsRemote() {
+		return "", fmt.Errorf("logs are only available for local container instances")
 	}
 	if tail == "" {
 		tail = "200"
@@ -409,6 +474,9 @@ func (s *Service) InstanceLogsFollow(ctx context.Context, id uint, tail string) 
 	inst, err := s.GetInstance(id)
 	if err != nil {
 		return nil, err
+	}
+	if inst.IsRemote() {
+		return nil, fmt.Errorf("logs are only available for local container instances")
 	}
 	if tail == "" {
 		tail = "100"
@@ -441,27 +509,31 @@ func (s *Service) GetConnectionInfo(id uint) (*ConnectionInfo, error) {
 	}
 
 	info := &ConnectionInfo{
-		Host:           "localhost",
+		Host:           inst.DBHost(),
 		Port:           inst.Port,
-		DockerInternal: fmt.Sprintf("%s:%d", inst.ContainerName, defaultInternalPort(inst.Engine)),
+		DockerInternal: "",
+	}
+	if !inst.IsRemote() {
+		info.Host = "localhost"
+		info.DockerInternal = fmt.Sprintf("%s:%d", inst.ContainerName, defaultInternalPort(inst.Engine))
 	}
 
 	switch inst.Engine {
 	case EngineMySQL, EngineMariaDB:
-		info.Username = "root"
-		info.ConnectionURI = fmt.Sprintf("mysql://root@localhost:%d/", inst.Port)
-		info.CLICommand = fmt.Sprintf("mysql -h 127.0.0.1 -P %d -u root -p", inst.Port)
-		info.EnvVar = fmt.Sprintf("DATABASE_URL=mysql://root:PASSWORD@localhost:%d/dbname", inst.Port)
+		info.Username = inst.DBUsername()
+		info.ConnectionURI = fmt.Sprintf("mysql://%s@%s:%d/", info.Username, info.Host, inst.Port)
+		info.CLICommand = fmt.Sprintf("mysql -h %s -P %d -u %s -p", info.Host, inst.Port, info.Username)
+		info.EnvVar = fmt.Sprintf("DATABASE_URL=mysql://%s:PASSWORD@%s:%d/dbname", info.Username, info.Host, inst.Port)
 	case EnginePostgres:
-		info.Username = "postgres"
-		info.ConnectionURI = fmt.Sprintf("postgresql://postgres@localhost:%d/", inst.Port)
-		info.CLICommand = fmt.Sprintf("psql -h 127.0.0.1 -p %d -U postgres", inst.Port)
-		info.EnvVar = fmt.Sprintf("DATABASE_URL=postgresql://postgres:PASSWORD@localhost:%d/dbname", inst.Port)
+		info.Username = inst.DBUsername()
+		info.ConnectionURI = fmt.Sprintf("postgresql://%s@%s:%d/", info.Username, info.Host, inst.Port)
+		info.CLICommand = fmt.Sprintf("psql -h %s -p %d -U %s", info.Host, inst.Port, info.Username)
+		info.EnvVar = fmt.Sprintf("DATABASE_URL=postgresql://%s:PASSWORD@%s:%d/dbname", info.Username, info.Host, inst.Port)
 	case EngineRedis:
 		info.Username = ""
-		info.ConnectionURI = fmt.Sprintf("redis://:%s@localhost:%d/0", "PASSWORD", inst.Port)
-		info.CLICommand = fmt.Sprintf("redis-cli -h 127.0.0.1 -p %d -a PASSWORD", inst.Port)
-		info.EnvVar = fmt.Sprintf("REDIS_URL=redis://:PASSWORD@localhost:%d/0", inst.Port)
+		info.ConnectionURI = fmt.Sprintf("redis://:%s@%s:%d/0", "PASSWORD", info.Host, inst.Port)
+		info.CLICommand = fmt.Sprintf("redis-cli -h %s -p %d -a PASSWORD", info.Host, inst.Port)
+		info.EnvVar = fmt.Sprintf("REDIS_URL=redis://:PASSWORD@%s:%d/0", info.Host, inst.Port)
 	}
 
 	return info, nil
@@ -474,6 +546,16 @@ func (s *Service) GetRootPassword(id uint) (string, error) {
 		return "", err
 	}
 	return inst.RootPassword, nil
+}
+
+func (s *Service) TestConnection(id uint) error {
+	inst, err := s.GetInstance(id)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return NewDBClient().Ping(ctx, inst)
 }
 
 // ExecuteQuery executes a read-only query against a running database instance.
@@ -610,6 +692,22 @@ func containsUnquotedSemicolon(s string) bool {
 
 // ListDatabases returns databases for an instance.
 func (s *Service) ListDatabases(instanceID uint) ([]Database, error) {
+	inst, err := s.GetInstance(instanceID)
+	if err != nil {
+		return nil, err
+	}
+	if inst.Status == "running" && inst.Engine != EngineRedis {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if dbs, err := NewDBClient().ListDatabases(ctx, inst); err == nil {
+			for i := range dbs {
+				dbs[i].InstanceID = instanceID
+			}
+			return dbs, nil
+		} else if inst.IsRemote() {
+			return nil, err
+		}
+	}
 	var dbs []Database
 	if err := s.db.Where("instance_id = ?", instanceID).Order("id ASC").Find(&dbs).Error; err != nil {
 		return nil, err
@@ -683,6 +781,22 @@ func (s *Service) DeleteDatabase(instanceID uint, dbName string) error {
 
 // ListUsers returns database users for an instance.
 func (s *Service) ListUsers(instanceID uint) ([]DatabaseUser, error) {
+	inst, err := s.GetInstance(instanceID)
+	if err != nil {
+		return nil, err
+	}
+	if inst.Status == "running" && inst.Engine != EngineRedis {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if users, err := NewDBClient().ListUsers(ctx, inst); err == nil {
+			for i := range users {
+				users[i].InstanceID = instanceID
+			}
+			return users, nil
+		} else if inst.IsRemote() {
+			return nil, err
+		}
+	}
 	var users []DatabaseUser
 	if err := s.db.Where("instance_id = ?", instanceID).Order("id ASC").Find(&users).Error; err != nil {
 		return nil, err
@@ -814,6 +928,15 @@ func findEngine(engine EngineType) *EngineInfo {
 
 // resolveInstanceStatus checks Docker for actual container state.
 func (s *Service) resolveInstanceStatus(inst *Instance) string {
+	if inst.IsRemote() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := NewDBClient().Ping(ctx, inst); err != nil {
+			return "stopped"
+		}
+		return "running"
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -827,6 +950,24 @@ func (s *Service) resolveInstanceStatus(inst *Instance) string {
 		return "running"
 	}
 	return "stopped"
+}
+
+func normalizeInstanceSource(source string) string {
+	switch strings.ToLower(strings.TrimSpace(source)) {
+	case instanceSourceRemote:
+		return instanceSourceRemote
+	default:
+		return instanceSourceLocal
+	}
+}
+
+func normalizeSSLMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "require", "verify-ca", "verify-full":
+		return strings.ToLower(strings.TrimSpace(mode))
+	default:
+		return "disable"
+	}
 }
 
 // runCompose executes a docker compose command in the given directory.

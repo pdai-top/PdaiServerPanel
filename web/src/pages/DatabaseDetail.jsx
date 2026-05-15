@@ -193,6 +193,17 @@ export default function DatabaseDetail() {
         } finally { setActionLoading(false) }
     }
 
+    const handleTestConnection = async () => {
+        setActionLoading(true)
+        try {
+            await databaseAPI.testConnection(id)
+            await fetchInstance()
+            showMessage('success', 'Connection OK')
+        } catch (e) {
+            showMessage('error', e.response?.data?.error || t('common.operation_failed'))
+        } finally { setActionLoading(false) }
+    }
+
     const handleDelete = async () => {
         if (!confirm(t('database.confirm_delete', { name: instance?.name }))) return
         try {
@@ -377,9 +388,10 @@ export default function DatabaseDetail() {
     // ---- Connection info helpers (continued) ----
 
     const isRedis = instance?.engine === 'redis'
-    const defaultUser = instance?.engine === 'postgres' ? 'postgres' : 'root'
+    const isRemote = instance?.source === 'remote'
+    const defaultUser = connectionInfo?.username || instance?.username || (instance?.engine === 'postgres' ? 'postgres' : 'root')
     const defaultPort = connectionInfo?.port || instance?.port || ''
-    const host = connectionInfo?.host || 'localhost'
+    const host = connectionInfo?.host || instance?.host || 'localhost'
 
     const buildConnectionUri = () => {
         if (!instance) return ''
@@ -408,7 +420,7 @@ export default function DatabaseDetail() {
     }
 
     const buildDockerInternal = () => {
-        if (!instance) return ''
+        if (!instance || isRemote) return ''
         return connectionInfo?.docker_internal || `${instance.name}:${defaultPort}`
     }
 
@@ -453,6 +465,9 @@ export default function DatabaseDetail() {
                             <Badge color={engineColors[instance.engine] || 'gray'} variant="soft">
                                 {instance.engine}
                             </Badge>
+                            <Badge color={isRemote ? 'orange' : 'gray'} variant="soft">
+                                {isRemote ? 'Remote' : 'Local'}
+                            </Badge>
                             {instance.version && (
                                 <Badge color="gray" variant="soft">{instance.version}</Badge>
                             )}
@@ -463,19 +478,27 @@ export default function DatabaseDetail() {
                     </Box>
                 </Flex>
                 <Flex gap="2">
-                    {instance.status === 'stopped' && (
-                        <Button size="2" variant="soft" color="green" onClick={handleStart} disabled={actionLoading}>
-                            <Play size={14} /> {t('docker.start')}
+                    {isRemote ? (
+                        <Button size="2" variant="soft" color="green" onClick={handleTestConnection} disabled={actionLoading}>
+                            <CheckCircle2 size={14} /> Test connection
                         </Button>
+                    ) : (
+                        <>
+                            {instance.status === 'stopped' && (
+                                <Button size="2" variant="soft" color="green" onClick={handleStart} disabled={actionLoading}>
+                                    <Play size={14} /> {t('docker.start')}
+                                </Button>
+                            )}
+                            {instance.status === 'running' && (
+                                <Button size="2" variant="soft" color="orange" onClick={handleStop} disabled={actionLoading}>
+                                    <Square size={14} /> {t('docker.stop')}
+                                </Button>
+                            )}
+                            <Button size="2" variant="soft" onClick={handleRestart} disabled={actionLoading}>
+                                <RotateCw size={14} /> {t('docker.restart')}
+                            </Button>
+                        </>
                     )}
-                    {instance.status === 'running' && (
-                        <Button size="2" variant="soft" color="orange" onClick={handleStop} disabled={actionLoading}>
-                            <Square size={14} /> {t('docker.stop')}
-                        </Button>
-                    )}
-                    <Button size="2" variant="soft" onClick={handleRestart} disabled={actionLoading}>
-                        <RotateCw size={14} /> {t('docker.restart')}
-                    </Button>
                     <Button size="2" variant="soft" color="red" onClick={handleDelete}>
                         <Trash2 size={14} /> {t('common.delete')}
                     </Button>
@@ -493,7 +516,9 @@ export default function DatabaseDetail() {
                     )}
                     <Tabs.Trigger value="connection">{t('database.tab_connection')}</Tabs.Trigger>
                     <Tabs.Trigger value="query">{t('database.tab_query')}</Tabs.Trigger>
-                    <Tabs.Trigger value="logs">{t('database.tab_logs')}</Tabs.Trigger>
+                    {!isRemote && (
+                        <Tabs.Trigger value="logs">{t('database.tab_logs')}</Tabs.Trigger>
+                    )}
                 </Tabs.List>
 
                 {/* Tab 1: Databases */}
@@ -775,15 +800,17 @@ export default function DatabaseDetail() {
                                 </Tooltip>
                             </Flex>
 
-                            <Separator size="4" />
-
-                            {/* Docker Internal */}
-                            <ConnectionRow
-                                label={t('database.docker_internal')}
-                                value={buildDockerInternal()}
-                                onCopy={() => copyToClipboard(buildDockerInternal())}
-                                t={t}
-                            />
+                            {!isRemote && (
+                                <>
+                                    <Separator size="4" />
+                                    <ConnectionRow
+                                        label={t('database.docker_internal')}
+                                        value={buildDockerInternal()}
+                                        onCopy={() => copyToClipboard(buildDockerInternal())}
+                                        t={t}
+                                    />
+                                </>
+                            )}
                         </Flex>
                     </Card>
                 </Tabs.Content>
@@ -800,7 +827,6 @@ export default function DatabaseDetail() {
                                 <Select.Root value={queryDb} onValueChange={setQueryDb}>
                                     <Select.Trigger style={{ width: '100%' }} placeholder={t('database.query_no_database')} />
                                     <Select.Content>
-                                        <Select.Item value="">{t('database.query_no_database')}</Select.Item>
                                         {databases.map(db => (
                                             <Select.Item key={db.name} value={db.name}>{db.name}</Select.Item>
                                         ))}
@@ -879,6 +905,7 @@ export default function DatabaseDetail() {
                 </Tabs.Content>
 
                 {/* Tab 4: Logs */}
+                {!isRemote && (
                 <Tabs.Content value="logs">
                     <Card mt="3">
                         <Flex justify="between" align="center" mb="3" wrap="wrap" gap="2">
@@ -932,6 +959,7 @@ export default function DatabaseDetail() {
                         </Box>
                     </Card>
                 </Tabs.Content>
+                )}
             </Tabs.Root>
 
             {/* Create Database Dialog */}

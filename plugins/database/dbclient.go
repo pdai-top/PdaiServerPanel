@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 
 	mysqldriver "github.com/go-sql-driver/mysql" // MySQL driver
@@ -24,10 +25,10 @@ func NewDBClient() *DBClient {
 func (c *DBClient) connectMySQL(inst *Instance) (*sql.DB, error) {
 	// Use mysql.Config to safely build DSN with any special characters in password.
 	cfg := mysqldriver.NewConfig()
-	cfg.User = "root"
+	cfg.User = inst.DBUsername()
 	cfg.Passwd = inst.RootPassword
 	cfg.Net = "tcp"
-	cfg.Addr = fmt.Sprintf("127.0.0.1:%d", inst.Port)
+	cfg.Addr = inst.DBAddr()
 	dsn := cfg.FormatDSN()
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
@@ -45,8 +46,8 @@ func (c *DBClient) connectPostgres(inst *Instance) (*sql.DB, error) {
 	// Quote password with single quotes; escape backslashes first, then quotes (libpq convention).
 	escapedPwd := strings.ReplaceAll(inst.RootPassword, `\`, `\\`)
 	escapedPwd = strings.ReplaceAll(escapedPwd, "'", `\'`)
-	dsn := fmt.Sprintf("host=127.0.0.1 port=%d user=postgres password='%s' sslmode=disable",
-		inst.Port, escapedPwd)
+	dsn := fmt.Sprintf("host=%s port=%d user=%s password='%s' sslmode=%s",
+		inst.DBHost(), inst.Port, inst.DBUsername(), escapedPwd, inst.DBSSLMode())
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		return nil, err
@@ -61,9 +62,66 @@ func (c *DBClient) connectPostgres(inst *Instance) (*sql.DB, error) {
 // connectRedis connects to a Redis instance.
 func (c *DBClient) connectRedis(inst *Instance) *redis.Client {
 	return redis.NewClient(&redis.Options{
-		Addr:     fmt.Sprintf("127.0.0.1:%d", inst.Port),
+		Addr:     inst.DBAddr(),
 		Password: inst.RootPassword,
 	})
+}
+
+func (inst *Instance) IsRemote() bool {
+	return inst.Source == "remote"
+}
+
+func (inst *Instance) DBHost() string {
+	if inst.Host != "" {
+		return inst.Host
+	}
+	return "127.0.0.1"
+}
+
+func (inst *Instance) DBAddr() string {
+	return inst.DBHost() + ":" + strconv.Itoa(inst.Port)
+}
+
+func (inst *Instance) DBUsername() string {
+	if inst.Username != "" {
+		return inst.Username
+	}
+	if inst.Engine == EnginePostgres {
+		return "postgres"
+	}
+	return "root"
+}
+
+func (inst *Instance) DBSSLMode() string {
+	if inst.SSLMode != "" {
+		return inst.SSLMode
+	}
+	return "disable"
+}
+
+func (c *DBClient) Ping(ctx context.Context, inst *Instance) error {
+	switch inst.Engine {
+	case EngineMySQL, EngineMariaDB:
+		db, err := c.connectMySQL(inst)
+		if err != nil {
+			return err
+		}
+		defer db.Close()
+		return db.PingContext(ctx)
+	case EnginePostgres:
+		db, err := c.connectPostgres(inst)
+		if err != nil {
+			return err
+		}
+		defer db.Close()
+		return db.PingContext(ctx)
+	case EngineRedis:
+		rdb := c.connectRedis(inst)
+		defer rdb.Close()
+		return rdb.Ping(ctx).Err()
+	default:
+		return fmt.Errorf("unsupported engine: %s", inst.Engine)
+	}
 }
 
 // ── Database operations ──
@@ -159,6 +217,101 @@ func (c *DBClient) DropUser(inst *Instance, username string) error {
 
 // ── Internal helpers ──
 
+func (c *DBClient) ListDatabases(ctx context.Context, inst *Instance) ([]Database, error) {
+	switch inst.Engine {
+	case EngineMySQL, EngineMariaDB:
+		db, err := c.connectMySQL(inst)
+		if err != nil {
+			return nil, err
+		}
+		defer db.Close()
+		rows, err := db.QueryContext(ctx, "SELECT SCHEMA_NAME, DEFAULT_CHARACTER_SET_NAME, DEFAULT_COLLATION_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME NOT IN ('information_schema','mysql','performance_schema','sys') ORDER BY SCHEMA_NAME")
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		var out []Database
+		for rows.Next() {
+			var item Database
+			if err := rows.Scan(&item.Name, &item.Charset, &item.Collation); err != nil {
+				return nil, err
+			}
+			out = append(out, item)
+		}
+		return out, rows.Err()
+	case EnginePostgres:
+		db, err := c.connectPostgres(inst)
+		if err != nil {
+			return nil, err
+		}
+		defer db.Close()
+		rows, err := db.QueryContext(ctx, "SELECT datname, pg_encoding_to_char(encoding) FROM pg_database WHERE datistemplate = false ORDER BY datname")
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		var out []Database
+		for rows.Next() {
+			var item Database
+			if err := rows.Scan(&item.Name, &item.Charset); err != nil {
+				return nil, err
+			}
+			out = append(out, item)
+		}
+		return out, rows.Err()
+	default:
+		return nil, fmt.Errorf("engine %s does not support database listing", inst.Engine)
+	}
+}
+
+func (c *DBClient) ListUsers(ctx context.Context, inst *Instance) ([]DatabaseUser, error) {
+	switch inst.Engine {
+	case EngineMySQL, EngineMariaDB:
+		db, err := c.connectMySQL(inst)
+		if err != nil {
+			return nil, err
+		}
+		defer db.Close()
+		rows, err := db.QueryContext(ctx, "SELECT User, Host FROM mysql.user WHERE User NOT IN ('mysql.infoschema','mysql.session','mysql.sys') ORDER BY User, Host")
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		var out []DatabaseUser
+		for rows.Next() {
+			var item DatabaseUser
+			if err := rows.Scan(&item.Username, &item.Host); err != nil {
+				return nil, err
+			}
+			out = append(out, item)
+		}
+		return out, rows.Err()
+	case EnginePostgres:
+		db, err := c.connectPostgres(inst)
+		if err != nil {
+			return nil, err
+		}
+		defer db.Close()
+		rows, err := db.QueryContext(ctx, "SELECT rolname FROM pg_roles WHERE rolcanlogin = true ORDER BY rolname")
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		var out []DatabaseUser
+		for rows.Next() {
+			var item DatabaseUser
+			if err := rows.Scan(&item.Username); err != nil {
+				return nil, err
+			}
+			item.Host = "%"
+			out = append(out, item)
+		}
+		return out, rows.Err()
+	default:
+		return nil, fmt.Errorf("engine %s does not support user listing", inst.Engine)
+	}
+}
+
 func (c *DBClient) mysqlExec(inst *Instance, query string) error {
 	db, err := c.connectMySQL(inst)
 	if err != nil {
@@ -246,10 +399,10 @@ func (c *DBClient) executeSQLQuery(ctx context.Context, driver string, inst *Ins
 	case "mysql":
 		if database != "" {
 			cfg := mysqldriver.NewConfig()
-			cfg.User = "root"
+			cfg.User = inst.DBUsername()
 			cfg.Passwd = inst.RootPassword
 			cfg.Net = "tcp"
-			cfg.Addr = fmt.Sprintf("127.0.0.1:%d", inst.Port)
+			cfg.Addr = inst.DBAddr()
 			cfg.DBName = database
 			db, err = sql.Open("mysql", cfg.FormatDSN())
 		} else {
@@ -259,8 +412,8 @@ func (c *DBClient) executeSQLQuery(ctx context.Context, driver string, inst *Ins
 		if database != "" {
 			escapedPwd := strings.ReplaceAll(inst.RootPassword, `\`, `\\`)
 			escapedPwd = strings.ReplaceAll(escapedPwd, "'", `\'`)
-			dsn := fmt.Sprintf("host=127.0.0.1 port=%d user=postgres password='%s' sslmode=disable dbname=%s",
-				inst.Port, escapedPwd, database)
+			dsn := fmt.Sprintf("host=%s port=%d user=%s password='%s' sslmode=%s dbname=%s",
+				inst.DBHost(), inst.Port, inst.DBUsername(), escapedPwd, inst.DBSSLMode(), database)
 			db, err = sql.Open("postgres", dsn)
 		} else {
 			db, err = c.connectPostgres(inst)

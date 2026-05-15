@@ -124,7 +124,6 @@ export default function DatabaseQuery() {
                             <Select.Root value={selectedDb} onValueChange={setSelectedDb}>
                                 <Select.Trigger style={{ width: '100%' }} placeholder={t('database.query_no_database')} />
                                 <Select.Content>
-                                    <Select.Item value="">{t('database.query_no_database')}</Select.Item>
                                     {databases.map(db => (
                                         <Select.Item key={db.name} value={db.name}>{db.name}</Select.Item>
                                     ))}

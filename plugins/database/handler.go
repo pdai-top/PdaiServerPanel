@@ -216,6 +216,18 @@ func (h *Handler) GetRootPassword(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"password": password})
 }
 
+func (h *Handler) TestConnection(c *gin.Context) {
+	id, err := parseID(c)
+	if err != nil {
+		return
+	}
+	if err := h.svc.TestConnection(id); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
 // ExecuteQuery executes a SQL query or Redis command against a running instance.
 func (h *Handler) ExecuteQuery(c *gin.Context) {
 	id, err := parseID(c)

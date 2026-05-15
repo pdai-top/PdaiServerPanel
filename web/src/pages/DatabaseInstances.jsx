@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+﻿import { useState, useEffect, useCallback, useRef } from 'react'
 import { Box, Flex, Grid, Card, Button, IconButton, Text, Heading, Badge, Dialog, TextField, Select, Switch, Callout, Separator, Tooltip } from '@radix-ui/themes'
 import { Database, Plus, Play, Square, RotateCcw, FileText, Link, Trash2, RefreshCw, AlertCircle, CheckCircle2, Sparkles, ChevronDown, ChevronRight } from 'lucide-react'
 import { databaseAPI, dockerAPI } from '../api/index.js'
@@ -39,9 +39,13 @@ export default function DatabaseInstances() {
     const [message, setMessage] = useState(null)
     const [showAdvanced, setShowAdvanced] = useState(false)
     const [form, setForm] = useState({
+        source: 'local',
         name: '',
         engine: '',
         version: '',
+        host: '',
+        username: '',
+        ssl_mode: 'disable',
         root_password: '',
         port: '',
         memory_limit: '0.5',
@@ -56,6 +60,7 @@ export default function DatabaseInstances() {
     const [progressError, setProgressError] = useState(null)
     const progressRef = useRef(null)
     const refreshTimerRef = useRef(null)
+    const dockerAvailable = !!(dockerStatus?.installed && dockerStatus?.daemon_running)
 
     const fetchData = useCallback(async () => {
         try {
@@ -105,6 +110,12 @@ export default function DatabaseInstances() {
 
     useEffect(() => { checkDocker() }, [checkDocker])
 
+    useEffect(() => {
+        if (dockerStatus && !dockerAvailable) {
+            setForm((f) => (f.source === 'local' ? { ...f, source: 'remote', auto_start: false } : f))
+        }
+    }, [dockerStatus, dockerAvailable])
+
     const showMessage = (type, text) => {
         setMessage({ type, text })
         setTimeout(() => setMessage(null), 4000)
@@ -134,13 +145,17 @@ export default function DatabaseInstances() {
 
     const resetForm = () => {
         setForm({
+            source: dockerAvailable ? 'local' : 'remote',
             name: '',
             engine: '',
             version: '',
+            host: '',
+            username: '',
+            ssl_mode: 'disable',
             root_password: '',
             port: '',
             memory_limit: '0.5',
-            auto_start: true,
+            auto_start: dockerAvailable,
             tuning_preset: '',
             config: {},
         })
@@ -152,9 +167,13 @@ export default function DatabaseInstances() {
         setCreating(true)
 
         const payload = {
+            source: form.source,
             name: form.name.trim(),
             engine: form.engine,
             version: form.version,
+            host: form.host.trim(),
+            username: form.username.trim(),
+            ssl_mode: form.ssl_mode,
             root_password: form.root_password,
             port: form.port ? parseInt(form.port, 10) : 0,
             memory_limit: form.memory_limit ? form.memory_limit + 'g' : '',
@@ -163,13 +182,12 @@ export default function DatabaseInstances() {
         if (form.engine === 'postgres' && form.tuning_preset) {
             payload.tuning_preset = form.tuning_preset
         }
-        // Skip explicit config when a tuning preset is selected — backend
+        // Skip explicit config when a tuning preset is selected 鈥?backend
         // computes it server-side from the preset + memory budget.
         if (Object.keys(form.config).length > 0 && !payload.tuning_preset) {
             payload.config = form.config
         }
 
-        // Close create dialog, open progress dialog
         setDialogOpen(false)
         setProgressOpen(true)
         setProgressLogs([])
@@ -177,6 +195,16 @@ export default function DatabaseInstances() {
         setProgressError(null)
 
         try {
+            if (form.source === 'remote') {
+                setProgressLogs(['Testing remote database connection...'])
+                await databaseAPI.createInstance(payload)
+                setProgressLogs((prev) => [...prev, 'Remote database registered.'])
+                setProgressDone(true)
+                resetForm()
+                await fetchData()
+                return
+            }
+
             const token = localStorage.getItem('token')
             const response = await fetch('/api/plugins/database/instances/stream', {
                 method: 'POST',
@@ -236,6 +264,12 @@ export default function DatabaseInstances() {
     }
 
     const selectedEngine = engines.find((e) => e.engine === form.engine)
+    const isRemoteForm = form.source === 'remote'
+    const createDisabled = creating
+        || !form.name.trim()
+        || !form.engine
+        || (isRemoteForm && !form.host.trim())
+        || (!isRemoteForm && !dockerAvailable)
 
     const runningCount = instances.filter((i) => i.status === 'running').length
 
@@ -256,26 +290,6 @@ export default function DatabaseInstances() {
                 <RefreshCw size={20} className="spin" />
                 <Text ml="2">{t('common.loading')}</Text>
             </Flex>
-        )
-    }
-
-    // Show Docker required screen if Docker is not available
-    if (dockerStatus && (!dockerStatus.installed || !dockerStatus.daemon_running)) {
-        return (
-            <Box>
-                <Flex align="center" gap="2" mb="4">
-                    <Database size={24} />
-                    <Heading size="5">{t('database.title')}</Heading>
-                </Flex>
-                <DockerRequired
-                    installed={dockerStatus.installed}
-                    daemonRunning={dockerStatus.daemon_running}
-                    error={dockerStatus.error}
-                    runtime={dockerStatus.runtime}
-                    onRetry={checkDocker}
-                    extraMessage={t('database.docker_required')}
-                />
-            </Box>
         )
     }
 
@@ -307,6 +321,19 @@ export default function DatabaseInstances() {
                     </Callout.Icon>
                     <Callout.Text>{message.text}</Callout.Text>
                 </Callout.Root>
+            )}
+
+            {!dockerAvailable && dockerStatus && (
+                <Box mb="4">
+                    <DockerRequired
+                        installed={dockerStatus.installed}
+                        daemonRunning={dockerStatus.daemon_running}
+                        error={dockerStatus.error}
+                        runtime={dockerStatus.runtime}
+                        onRetry={checkDocker}
+                        extraMessage="Docker is required for local database containers; remote databases can still be added and managed."
+                    />
+                </Box>
             )}
 
             {/* Summary Cards */}
@@ -364,6 +391,9 @@ export default function DatabaseInstances() {
                                         >
                                             {inst.engine}
                                         </Badge>
+                                        <Badge color={inst.source === 'remote' ? 'orange' : 'gray'} variant="soft" size="1">
+                                            {inst.source === 'remote' ? 'Remote' : 'Local'}
+                                        </Badge>
                                         {inst.version && (
                                             <Badge color="gray" variant="soft" size="1">
                                                 {inst.version}
@@ -386,52 +416,68 @@ export default function DatabaseInstances() {
 
                                 {/* Right side: actions */}
                                 <Flex gap="2" align="center" wrap="wrap">
-                                    {inst.status !== 'running' && inst.status !== 'creating' && (
-                                        <Tooltip content={t('docker.start')}>
+                                    {inst.source === 'remote' ? (
+                                        <Tooltip content="Test connection">
                                             <IconButton
                                                 size="2"
                                                 variant="soft"
                                                 color="green"
                                                 disabled={!!actionLoading}
-                                                onClick={() => doAction(inst.id, 'startInstance', t('docker.start'))}
+                                                onClick={() => doAction(inst.id, 'testConnection', 'Test connection')}
                                             >
-                                                <Play size={14} />
+                                                <CheckCircle2 size={14} />
                                             </IconButton>
                                         </Tooltip>
+                                    ) : (
+                                        <>
+                                            {inst.status !== 'running' && inst.status !== 'creating' && (
+                                                <Tooltip content={t('docker.start')}>
+                                                    <IconButton
+                                                        size="2"
+                                                        variant="soft"
+                                                        color="green"
+                                                        disabled={!!actionLoading}
+                                                        onClick={() => doAction(inst.id, 'startInstance', t('docker.start'))}
+                                                    >
+                                                        <Play size={14} />
+                                                    </IconButton>
+                                                </Tooltip>
+                                            )}
+                                            {inst.status === 'running' && (
+                                                <Tooltip content={t('docker.stop')}>
+                                                    <IconButton
+                                                        size="2"
+                                                        variant="soft"
+                                                        color="orange"
+                                                        disabled={!!actionLoading}
+                                                        onClick={() => doAction(inst.id, 'stopInstance', t('docker.stop'))}
+                                                    >
+                                                        <Square size={14} />
+                                                    </IconButton>
+                                                </Tooltip>
+                                            )}
+                                            <Tooltip content={t('docker.restart')}>
+                                                <IconButton
+                                                    size="2"
+                                                    variant="soft"
+                                                    disabled={!!actionLoading || inst.status === 'creating'}
+                                                    onClick={() => doAction(inst.id, 'restartInstance', t('docker.restart'))}
+                                                >
+                                                    <RotateCcw size={14} />
+                                                </IconButton>
+                                            </Tooltip>
+                                            <Tooltip content={t('docker.logs')}>
+                                                <IconButton
+                                                    size="2"
+                                                    variant="soft"
+                                                    disabled={inst.status === 'creating'}
+                                                    onClick={() => navigate(`/database/${inst.id}?tab=logs`)}
+                                                >
+                                                    <FileText size={14} />
+                                                </IconButton>
+                                            </Tooltip>
+                                        </>
                                     )}
-                                    {inst.status === 'running' && (
-                                        <Tooltip content={t('docker.stop')}>
-                                            <IconButton
-                                                size="2"
-                                                variant="soft"
-                                                color="orange"
-                                                disabled={!!actionLoading}
-                                                onClick={() => doAction(inst.id, 'stopInstance', t('docker.stop'))}
-                                            >
-                                                <Square size={14} />
-                                            </IconButton>
-                                        </Tooltip>
-                                    )}
-                                    <Tooltip content={t('docker.restart')}>
-                                        <IconButton
-                                            size="2"
-                                            variant="soft"
-                                            disabled={!!actionLoading || inst.status === 'creating'}
-                                            onClick={() => doAction(inst.id, 'restartInstance', t('docker.restart'))}
-                                        >
-                                            <RotateCcw size={14} />
-                                        </IconButton>
-                                    </Tooltip>
-                                    <Tooltip content={t('docker.logs')}>
-                                        <IconButton
-                                            size="2"
-                                            variant="soft"
-                                            disabled={inst.status === 'creating'}
-                                            onClick={() => navigate(`/database/${inst.id}?tab=logs`)}
-                                        >
-                                            <FileText size={14} />
-                                        </IconButton>
-                                    </Tooltip>
                                     <Tooltip content={t('database.tab_connection')}>
                                         <IconButton
                                             size="2"
@@ -465,6 +511,34 @@ export default function DatabaseInstances() {
                 <Dialog.Content maxWidth="600px">
                     <Dialog.Title>{t('database.create_instance')}</Dialog.Title>
                     <Flex direction="column" gap="4" mt="3">
+                        <Box>
+                            <Text size="2" weight="bold" mb="2" style={{ display: 'block' }}>
+                                Type
+                            </Text>
+                            <Flex gap="2" wrap="wrap">
+                                <Button
+                                    type="button"
+                                    variant={form.source === 'local' ? 'solid' : 'soft'}
+                                    disabled={!dockerAvailable}
+                                    onClick={() => setForm((f) => ({ ...f, source: 'local' }))}
+                                >
+                                    Local container
+                                </Button>
+                                <Button
+                                    type="button"
+                                    variant={form.source === 'remote' ? 'solid' : 'soft'}
+                                    onClick={() => setForm((f) => ({ ...f, source: 'remote', auto_start: false }))}
+                                >
+                                    Remote database
+                                </Button>
+                            </Flex>
+                            {!dockerAvailable && (
+                                <Text size="1" color="gray" mt="1" style={{ display: 'block' }}>
+                                    Docker is unavailable, so local container creation is disabled.
+                                </Text>
+                            )}
+                        </Box>
+
                         {/* Engine Selection */}
                         <Box>
                             <Text size="2" weight="bold" mb="2" style={{ display: 'block' }}>
@@ -524,8 +598,34 @@ export default function DatabaseInstances() {
                             />
                         </Box>
 
+                        {/* Remote endpoint */}
+                        {isRemoteForm && form.engine && (
+                            <Grid columns={{ initial: '1', sm: '2' }} gap="3">
+                                <Box>
+                                    <Text size="2" weight="bold" mb="1" style={{ display: 'block' }}>
+                                        Host *
+                                    </Text>
+                                    <TextField.Root
+                                        placeholder="192.168.1.10 or db.example.com"
+                                        value={form.host}
+                                        onChange={(e) => setForm((f) => ({ ...f, host: e.target.value }))}
+                                    />
+                                </Box>
+                                <Box>
+                                    <Text size="2" weight="bold" mb="1" style={{ display: 'block' }}>
+                                        Username
+                                    </Text>
+                                    <TextField.Root
+                                        placeholder={form.engine === 'postgres' ? 'postgres' : 'root'}
+                                        value={form.username}
+                                        onChange={(e) => setForm((f) => ({ ...f, username: e.target.value }))}
+                                    />
+                                </Box>
+                            </Grid>
+                        )}
+
                         {/* Version */}
-                        {selectedEngine && selectedEngine.versions?.length > 0 && (
+                        {!isRemoteForm && selectedEngine && selectedEngine.versions?.length > 0 && (
                             <Box>
                                 <Text size="2" weight="bold" mb="1" style={{ display: 'block' }}>
                                     {t('database.version')}
@@ -583,7 +683,28 @@ export default function DatabaseInstances() {
                             />
                         </Box>
 
+                        {isRemoteForm && form.engine === 'postgres' && (
+                            <Box>
+                                <Text size="2" weight="bold" mb="1" style={{ display: 'block' }}>
+                                    SSL mode
+                                </Text>
+                                <Select.Root
+                                    value={form.ssl_mode}
+                                    onValueChange={(v) => setForm((f) => ({ ...f, ssl_mode: v }))}
+                                >
+                                    <Select.Trigger style={{ width: '100%' }} />
+                                    <Select.Content>
+                                        <Select.Item value="disable">disable</Select.Item>
+                                        <Select.Item value="require">require</Select.Item>
+                                        <Select.Item value="verify-ca">verify-ca</Select.Item>
+                                        <Select.Item value="verify-full">verify-full</Select.Item>
+                                    </Select.Content>
+                                </Select.Root>
+                            </Box>
+                        )}
+
                         {/* Memory Limit */}
+                        {!isRemoteForm && (
                         <Box>
                             <Text size="2" weight="bold" mb="1" style={{ display: 'block' }}>
                                 {t('database.memory_limit')}
@@ -601,13 +722,14 @@ export default function DatabaseInstances() {
                                 <Text size="2" color="gray">GB</Text>
                             </Flex>
                         </Box>
+                        )}
 
                         {/* PostgreSQL workload tuning preset (postgres only).
                             Backend resolves the EngineConfig from the chosen
                             preset + the memory_limit field, so users don't
                             need to touch advanced settings to get a sensible
                             shared_buffers/work_mem layout. */}
-                        {form.engine === 'postgres' && pgTuningPresets.length > 0 && (
+                        {!isRemoteForm && form.engine === 'postgres' && pgTuningPresets.length > 0 && (
                             <Box>
                                 <Text size="2" weight="bold" mb="1" style={{ display: 'block' }}>
                                     {t('database.tuning_preset')}
@@ -632,13 +754,13 @@ export default function DatabaseInstances() {
                             </Box>
                         )}
 
-                        {/* Advanced Configuration — Collapsible.
+                        {/* Advanced Configuration 鈥?Collapsible.
                             Hidden when a postgres tuning preset is active:
                             the backend discards user-supplied Config in that
                             case, so exposing editable fields would silently
                             ignore the user's edits. See resolveTuningPreset
                             in plugins/database/service.go. */}
-                        {form.engine && !(form.engine === 'postgres' && form.tuning_preset) && (
+                        {!isRemoteForm && form.engine && !(form.engine === 'postgres' && form.tuning_preset) && (
                             <Box>
                                 <Flex
                                     align="center"
@@ -921,6 +1043,7 @@ export default function DatabaseInstances() {
                         )}
 
                         {/* Auto Start Switch */}
+                        {!isRemoteForm && (
                         <Flex align="center" gap="2">
                             <Switch
                                 checked={form.auto_start}
@@ -928,6 +1051,7 @@ export default function DatabaseInstances() {
                             />
                             <Text size="2">{t('database.auto_start')}</Text>
                         </Flex>
+                        )}
                     </Flex>
 
                     <Flex justify="end" gap="2" mt="4">
@@ -935,7 +1059,7 @@ export default function DatabaseInstances() {
                             <Button variant="soft" color="gray">{t('common.cancel')}</Button>
                         </Dialog.Close>
                         <Button
-                            disabled={creating || !form.name.trim() || !form.engine}
+                            disabled={createDisabled}
                             onClick={handleCreate}
                         >
                             {creating ? t('common.loading') : t('common.create')}

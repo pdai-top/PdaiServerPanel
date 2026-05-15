@@ -141,8 +141,12 @@ type Instance struct {
 	Engine        EngineType `gorm:"size:32;not null" json:"engine"`
 	Version       string     `gorm:"size:32;not null" json:"version"`
 	Status        string     `gorm:"size:16;default:stopped" json:"status"`
+	Source        string     `gorm:"size:16;default:local" json:"source"` // local or remote
+	Host          string     `gorm:"size:255" json:"host,omitempty"`
 	Port          int        `gorm:"not null" json:"port"`
+	Username      string     `gorm:"size:128" json:"username,omitempty"`
 	RootPassword  string     `gorm:"size:256" json:"-"`
+	SSLMode       string     `gorm:"size:32" json:"ssl_mode,omitempty"`
 	DataDir       string     `gorm:"size:512" json:"data_dir"`
 	ContainerName string     `gorm:"size:128" json:"container_name"`
 	MemoryLimit   string     `gorm:"size:32;default:0.5g" json:"memory_limit"`
@@ -191,8 +195,12 @@ type CreateInstanceRequest struct {
 	Name         string     `json:"name" binding:"required"`
 	Engine       EngineType `json:"engine" binding:"required"`
 	Version      string     `json:"version"`
+	Source       string     `json:"source"`
+	Host         string     `json:"host"`
 	Port         int        `json:"port"`
+	Username     string     `json:"username"`
 	RootPassword string     `json:"root_password"`
+	SSLMode      string     `json:"ssl_mode"`
 	MemoryLimit  string     `json:"memory_limit"`
 	AutoStart    bool       `json:"auto_start"`
 	// TuningPreset, when non-empty, runs the named workload-aware preset (see

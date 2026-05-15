@@ -24,9 +24,9 @@ func (p *Plugin) Metadata() pluginpkg.Metadata {
 		ID:           "database",
 		Name:         "Database",
 		Version:      "1.0.0",
-		Description:  "Create and manage MySQL, PostgreSQL, MariaDB, Redis instances via Docker",
+		Description:  "Create and manage local or remote MySQL, PostgreSQL, MariaDB, Redis databases",
 		Author:       "Pdai",
-		Dependencies: []string{"docker"},
+		Dependencies: []string{},
 		Priority:     15,
 		Icon:         "Database",
 		Category:     "database",
@@ -67,6 +67,7 @@ func (p *Plugin) Init(ctx *pluginpkg.Context) error {
 	r.GET("/instances/:id/logs/ws", p.handler.InstanceLogsWS)
 	r.GET("/instances/:id/connection", p.handler.GetConnectionInfo)
 	a.GET("/instances/:id/password", p.handler.GetRootPassword) // sensitive
+	a.POST("/instances/:id/test", p.handler.TestConnection)
 
 	// Database CRUD (admin)
 	r.GET("/instances/:id/databases", p.handler.ListDatabases)
