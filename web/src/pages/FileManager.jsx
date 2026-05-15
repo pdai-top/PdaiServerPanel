@@ -345,7 +345,7 @@ export default function FileManager() {
                                         <Text size="2" weight={file.is_dir ? 'medium' : 'regular'}>
                                             {file.name}
                                         </Text>
-                                        {file.is_symlink && <Badge size="1" variant="outline">link</Badge>}
+                                        {file.is_symlink && <Badge size="1" variant="outline">链接</Badge>}
                                     </Flex>
                                 </Table.Cell>
                                 <Table.Cell>

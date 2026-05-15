@@ -10,10 +10,10 @@ const statusColors = { running: 'green', stopped: 'gray', error: 'red', creating
 const engineColors = { mysql: 'blue', postgres: 'indigo', mariadb: 'teal', redis: 'red' }
 
 const engineDescriptions = {
-    mysql: 'The most popular open-source relational database',
-    postgres: 'Advanced open-source relational database',
-    mariadb: 'Community-developed fork of MySQL',
-    redis: 'In-memory data structure store',
+    mysql: '最流行的开源关系型数据库',
+    postgres: '高级开源关系型数据库',
+    mariadb: 'MySQL 的社区分支',
+    redis: '内存型数据结构存储',
 }
 
 function generatePassword() {
@@ -196,9 +196,9 @@ export default function DatabaseInstances() {
 
         try {
             if (form.source === 'remote') {
-                setProgressLogs(['Testing remote database connection...'])
+                setProgressLogs(['正在测试远程数据库连接...'])
                 await databaseAPI.createInstance(payload)
-                setProgressLogs((prev) => [...prev, 'Remote database registered.'])
+                setProgressLogs((prev) => [...prev, '远程数据库已添加。'])
                 setProgressDone(true)
                 resetForm()
                 await fetchData()
@@ -392,7 +392,7 @@ export default function DatabaseInstances() {
                                             {inst.engine}
                                         </Badge>
                                         <Badge color={inst.source === 'remote' ? 'orange' : 'gray'} variant="soft" size="1">
-                                            {inst.source === 'remote' ? 'Remote' : 'Local'}
+                                            {inst.source === 'remote' ? '远程' : '本地'}
                                         </Badge>
                                         {inst.version && (
                                             <Badge color="gray" variant="soft" size="1">
@@ -417,13 +417,13 @@ export default function DatabaseInstances() {
                                 {/* Right side: actions */}
                                 <Flex gap="2" align="center" wrap="wrap">
                                     {inst.source === 'remote' ? (
-                                        <Tooltip content="Test connection">
+                                        <Tooltip content="测试连接">
                                             <IconButton
                                                 size="2"
                                                 variant="soft"
                                                 color="green"
                                                 disabled={!!actionLoading}
-                                                onClick={() => doAction(inst.id, 'testConnection', 'Test connection')}
+                                                onClick={() => doAction(inst.id, 'testConnection', '测试连接')}
                                             >
                                                 <CheckCircle2 size={14} />
                                             </IconButton>
@@ -513,7 +513,7 @@ export default function DatabaseInstances() {
                     <Flex direction="column" gap="4" mt="3">
                         <Box>
                             <Text size="2" weight="bold" mb="2" style={{ display: 'block' }}>
-                                Type
+                                类型
                             </Text>
                             <Flex gap="2" wrap="wrap">
                                 <Button
@@ -522,19 +522,19 @@ export default function DatabaseInstances() {
                                     disabled={!dockerAvailable}
                                     onClick={() => setForm((f) => ({ ...f, source: 'local' }))}
                                 >
-                                    Local container
+                                    本地容器
                                 </Button>
                                 <Button
                                     type="button"
                                     variant={form.source === 'remote' ? 'solid' : 'soft'}
                                     onClick={() => setForm((f) => ({ ...f, source: 'remote', auto_start: false }))}
                                 >
-                                    Remote database
+                                    远程数据库
                                 </Button>
                             </Flex>
                             {!dockerAvailable && (
                                 <Text size="1" color="gray" mt="1" style={{ display: 'block' }}>
-                                    Docker is unavailable, so local container creation is disabled.
+                                    当前 Docker 不可用，本地容器创建已禁用。
                                 </Text>
                             )}
                         </Box>
@@ -603,17 +603,17 @@ export default function DatabaseInstances() {
                             <Grid columns={{ initial: '1', sm: '2' }} gap="3">
                                 <Box>
                                     <Text size="2" weight="bold" mb="1" style={{ display: 'block' }}>
-                                        Host *
+                                        主机 *
                                     </Text>
                                     <TextField.Root
-                                        placeholder="192.168.1.10 or db.example.com"
+                                        placeholder="192.168.1.10 或 db.example.com"
                                         value={form.host}
                                         onChange={(e) => setForm((f) => ({ ...f, host: e.target.value }))}
                                     />
                                 </Box>
                                 <Box>
                                     <Text size="2" weight="bold" mb="1" style={{ display: 'block' }}>
-                                        Username
+                                        用户名
                                     </Text>
                                     <TextField.Root
                                         placeholder={form.engine === 'postgres' ? 'postgres' : 'root'}
@@ -677,7 +677,7 @@ export default function DatabaseInstances() {
                             </Text>
                             <TextField.Root
                                 type="number"
-                                placeholder="Auto"
+                                placeholder="自动"
                                 value={form.port}
                                 onChange={(e) => setForm((f) => ({ ...f, port: e.target.value }))}
                             />
@@ -686,7 +686,7 @@ export default function DatabaseInstances() {
                         {isRemoteForm && form.engine === 'postgres' && (
                             <Box>
                                 <Text size="2" weight="bold" mb="1" style={{ display: 'block' }}>
-                                    SSL mode
+                                    SSL 模式
                                 </Text>
                                 <Select.Root
                                     value={form.ssl_mode}
@@ -694,10 +694,10 @@ export default function DatabaseInstances() {
                                 >
                                     <Select.Trigger style={{ width: '100%' }} />
                                     <Select.Content>
-                                        <Select.Item value="disable">disable</Select.Item>
-                                        <Select.Item value="require">require</Select.Item>
-                                        <Select.Item value="verify-ca">verify-ca</Select.Item>
-                                        <Select.Item value="verify-full">verify-full</Select.Item>
+                                        <Select.Item value="disable">禁用</Select.Item>
+                                        <Select.Item value="require">需要</Select.Item>
+                                        <Select.Item value="verify-ca">验证 CA</Select.Item>
+                                        <Select.Item value="verify-full">验证完整链</Select.Item>
                                     </Select.Content>
                                 </Select.Root>
                             </Box>

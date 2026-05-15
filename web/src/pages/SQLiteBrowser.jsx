@@ -191,10 +191,10 @@ export default function SQLiteBrowser() {
                                                         <Badge size="1" variant="soft" color="gray">{col.type || 'TEXT'}</Badge>
                                                     </Table.Cell>
                                                     <Table.Cell>
-                                                        {col.notnull ? <Badge size="1" color="orange">YES</Badge> : <Text size="2" color="gray">NO</Text>}
+                                                        {col.notnull ? <Badge size="1" color="orange">是</Badge> : <Text size="2" color="gray">否</Text>}
                                                     </Table.Cell>
                                                     <Table.Cell>
-                                                        {col.pk ? <Badge size="1" color="blue">YES</Badge> : <Text size="2" color="gray">NO</Text>}
+                                                        {col.pk ? <Badge size="1" color="blue">是</Badge> : <Text size="2" color="gray">否</Text>}
                                                     </Table.Cell>
                                                     <Table.Cell>
                                                         <Text size="2" color="gray">{col.dflt_value !== null && col.dflt_value !== undefined ? String(col.dflt_value) : '—'}</Text>

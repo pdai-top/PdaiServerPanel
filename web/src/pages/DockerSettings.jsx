@@ -256,7 +256,7 @@ export default function DockerSettings() {
                                             background: 'var(--color-background)',
                                         }}
                                     >
-                                        <option value="">Default (json-file)</option>
+                                        <option value="">默认（json-file）</option>
                                         {LOG_DRIVERS.map(d => <option key={d} value={d}>{d}</option>)}
                                     </select>
                                 </Box>
@@ -287,7 +287,7 @@ export default function DockerSettings() {
                                     background: 'var(--color-background)',
                                 }}
                             >
-                                <option value="">Default (overlay2)</option>
+                                <option value="">默认（overlay2）</option>
                                 {STORAGE_DRIVERS.map(d => <option key={d} value={d}>{d}</option>)}
                             </select>
 

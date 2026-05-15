@@ -228,6 +228,86 @@ func (h *Handler) TestConnection(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
+// ListBackups returns backup records for an instance.
+func (h *Handler) ListBackups(c *gin.Context) {
+	id, err := parseID(c)
+	if err != nil {
+		return
+	}
+	backups, err := h.svc.ListBackups(id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"backups": backups})
+}
+
+// CreateBackup creates a new logical SQL backup for an instance.
+func (h *Handler) CreateBackup(c *gin.Context) {
+	id, err := parseID(c)
+	if err != nil {
+		return
+	}
+	backup, err := h.svc.CreateBackup(id)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusCreated, backup)
+}
+
+// DownloadBackup downloads a backup file.
+func (h *Handler) DownloadBackup(c *gin.Context) {
+	id, err := parseID(c)
+	if err != nil {
+		return
+	}
+	backupID, err := parseBackupID(c)
+	if err != nil {
+		return
+	}
+	backup, err := h.svc.GetBackup(id, backupID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "backup not found"})
+		return
+	}
+	c.FileAttachment(backup.FilePath, backup.FileName)
+}
+
+// RestoreBackup restores a backup into the instance.
+func (h *Handler) RestoreBackup(c *gin.Context) {
+	id, err := parseID(c)
+	if err != nil {
+		return
+	}
+	backupID, err := parseBackupID(c)
+	if err != nil {
+		return
+	}
+	if err := h.svc.RestoreBackup(id, backupID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Backup restored"})
+}
+
+// DeleteBackup deletes a backup file and record.
+func (h *Handler) DeleteBackup(c *gin.Context) {
+	id, err := parseID(c)
+	if err != nil {
+		return
+	}
+	backupID, err := parseBackupID(c)
+	if err != nil {
+		return
+	}
+	if err := h.svc.DeleteBackup(id, backupID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Backup deleted"})
+}
+
 // ExecuteQuery executes a SQL query or Redis command against a running instance.
 func (h *Handler) ExecuteQuery(c *gin.Context) {
 	id, err := parseID(c)
@@ -477,6 +557,15 @@ func parseID(c *gin.Context) (uint, error) {
 	id, err := strconv.ParseUint(c.Param("id"), 10, 32)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return 0, err
+	}
+	return uint(id), nil
+}
+
+func parseBackupID(c *gin.Context) (uint, error) {
+	id, err := strconv.ParseUint(c.Param("backup_id"), 10, 32)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid backup id"})
 		return 0, err
 	}
 	return uint(id), nil

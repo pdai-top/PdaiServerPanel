@@ -28,6 +28,7 @@ export default function DatabaseDetail() {
     const [instance, setInstance] = useState(null)
     const [databases, setDatabases] = useState([])
     const [users, setUsers] = useState([])
+    const [backups, setBackups] = useState([])
     const [connectionInfo, setConnectionInfo] = useState(null)
     const [loading, setLoading] = useState(true)
 
@@ -91,6 +92,15 @@ export default function DatabaseDetail() {
         } catch { /* ignore for redis */ }
     }, [id])
 
+    const fetchBackups = useCallback(async () => {
+        try {
+            const res = await databaseAPI.listBackups(id)
+            setBackups(res.data?.backups || [])
+        } catch {
+            setBackups([])
+        }
+    }, [id])
+
     const fetchConnectionInfo = useCallback(async () => {
         try {
             const res = await databaseAPI.connectionInfo(id)
@@ -118,7 +128,8 @@ export default function DatabaseDetail() {
         fetchInstance()
         fetchDatabases()
         fetchUsers()
-    }, [fetchInstance, fetchDatabases, fetchUsers])
+        fetchBackups()
+    }, [fetchInstance, fetchDatabases, fetchUsers, fetchBackups])
 
     // Fetch connection info when tab changes
     useEffect(() => {
@@ -126,6 +137,12 @@ export default function DatabaseDetail() {
             fetchConnectionInfo()
         }
     }, [activeTab, connectionInfo, fetchConnectionInfo])
+
+    useEffect(() => {
+        if (activeTab === 'backups' && backups.length === 0) {
+            fetchBackups()
+        }
+    }, [activeTab, backups.length, fetchBackups])
 
     // Fetch logs when tab changes
     useEffect(() => {
@@ -198,7 +215,7 @@ export default function DatabaseDetail() {
         try {
             await databaseAPI.testConnection(id)
             await fetchInstance()
-            showMessage('success', 'Connection OK')
+            showMessage('success', '连接正常')
         } catch (e) {
             showMessage('error', e.response?.data?.error || t('common.operation_failed'))
         } finally { setActionLoading(false) }
@@ -273,6 +290,60 @@ export default function DatabaseDetail() {
             await databaseAPI.deleteUser(id, username)
             showMessage('success', t('database.user_deleted'))
             fetchUsers()
+        } catch (e) {
+            showMessage('error', e.response?.data?.error || t('common.operation_failed'))
+        }
+    }
+
+    const handleCreateBackup = async () => {
+        setActionLoading(true)
+        try {
+            await databaseAPI.createBackup(id)
+            showMessage('success', '备份已创建')
+            await fetchBackups()
+        } catch (e) {
+            showMessage('error', e.response?.data?.error || t('common.operation_failed'))
+        } finally {
+            setActionLoading(false)
+        }
+    }
+
+    const handleDeleteBackup = async (backup) => {
+        if (!confirm(`确定删除备份 "${backup.file_name}" 吗？`)) return
+        setActionLoading(true)
+        try {
+            await databaseAPI.deleteBackup(id, backup.id)
+            showMessage('success', '备份已删除')
+            await fetchBackups()
+        } catch (e) {
+            showMessage('error', e.response?.data?.error || t('common.operation_failed'))
+        } finally {
+            setActionLoading(false)
+        }
+    }
+
+    const handleRestoreBackup = async (backup) => {
+        if (!confirm(`确定从备份 "${backup.file_name}" 恢复吗？这会覆盖当前实例中的数据。`)) return
+        setActionLoading(true)
+        try {
+            await databaseAPI.restoreBackup(id, backup.id)
+            showMessage('success', '备份已恢复')
+        } catch (e) {
+            showMessage('error', e.response?.data?.error || t('common.operation_failed'))
+        } finally {
+            setActionLoading(false)
+        }
+    }
+
+    const handleDownloadBackup = async (backup) => {
+        try {
+            const res = await databaseAPI.downloadBackup(id, backup.id)
+            const url = URL.createObjectURL(res.data)
+            const a = document.createElement('a')
+            a.href = url
+            a.download = backup.file_name || 'database-backup.sql'
+            a.click()
+            URL.revokeObjectURL(url)
         } catch (e) {
             showMessage('error', e.response?.data?.error || t('common.operation_failed'))
         }
@@ -424,6 +495,30 @@ export default function DatabaseDetail() {
         return connectionInfo?.docker_internal || `${instance.name}:${defaultPort}`
     }
 
+    const formatBytes = (bytes) => {
+        if (!bytes) return '--'
+        const units = ['B', 'KB', 'MB', 'GB', 'TB']
+        let value = bytes
+        let idx = 0
+        while (value >= 1024 && idx < units.length - 1) {
+            value /= 1024
+            idx++
+        }
+        return `${value.toFixed(value >= 10 || idx === 0 ? 0 : 1)} ${units[idx]}`
+    }
+
+    const formatBackupStatus = (status) => {
+        if (status === 'completed') return '已完成'
+        if (status === 'running') return '进行中'
+        if (status === 'failed') return '失败'
+        return status || '--'
+    }
+
+    const formatTime = (value) => {
+        if (!value) return '--'
+        return new Date(value).toLocaleString()
+    }
+
     // ---- Charset options based on engine ----
 
     const getCharsetOptions = () => {
@@ -466,7 +561,7 @@ export default function DatabaseDetail() {
                                 {instance.engine}
                             </Badge>
                             <Badge color={isRemote ? 'orange' : 'gray'} variant="soft">
-                                {isRemote ? 'Remote' : 'Local'}
+                                {isRemote ? '远程' : '本地'}
                             </Badge>
                             {instance.version && (
                                 <Badge color="gray" variant="soft">{instance.version}</Badge>
@@ -480,7 +575,7 @@ export default function DatabaseDetail() {
                 <Flex gap="2">
                     {isRemote ? (
                         <Button size="2" variant="soft" color="green" onClick={handleTestConnection} disabled={actionLoading}>
-                            <CheckCircle2 size={14} /> Test connection
+                            <CheckCircle2 size={14} /> 测试连接
                         </Button>
                     ) : (
                         <>
@@ -516,6 +611,7 @@ export default function DatabaseDetail() {
                     )}
                     <Tabs.Trigger value="connection">{t('database.tab_connection')}</Tabs.Trigger>
                     <Tabs.Trigger value="query">{t('database.tab_query')}</Tabs.Trigger>
+                    <Tabs.Trigger value="backups">备份</Tabs.Trigger>
                     {!isRemote && (
                         <Tabs.Trigger value="logs">{t('database.tab_logs')}</Tabs.Trigger>
                     )}
@@ -900,6 +996,66 @@ export default function DatabaseDetail() {
                                     </Table.Root>
                                 </Box>
                             </Box>
+                        )}
+                    </Card>
+                </Tabs.Content>
+
+                {/* Tab: Backups */}
+                <Tabs.Content value="backups">
+                    <Card mt="3">
+                        <Flex justify="between" align="center" mb="3" wrap="wrap" gap="2">
+                            <Box>
+                                <Text size="2" weight="medium">备份</Text>
+                                <Text size="1" color="gray" style={{ display: 'block' }}>
+                                    为该数据库实例创建逻辑 SQL 备份。
+                                </Text>
+                            </Box>
+                            <Button size="2" onClick={handleCreateBackup} disabled={actionLoading || instance.status !== 'running'}>
+                                <Plus size={14} /> 立即备份
+                            </Button>
+                        </Flex>
+
+                        {backups.length === 0 ? (
+                            <Text size="2" color="gray">暂无备份。</Text>
+                        ) : (
+                            <Table.Root>
+                                <Table.Header>
+                                    <Table.Row>
+                                        <Table.ColumnHeaderCell>创建时间</Table.ColumnHeaderCell>
+                                        <Table.ColumnHeaderCell>名称</Table.ColumnHeaderCell>
+                                        <Table.ColumnHeaderCell>状态</Table.ColumnHeaderCell>
+                                        <Table.ColumnHeaderCell>大小</Table.ColumnHeaderCell>
+                                        <Table.ColumnHeaderCell>操作</Table.ColumnHeaderCell>
+                                    </Table.Row>
+                                </Table.Header>
+                                <Table.Body>
+                                    {backups.map((backup) => (
+                                        <Table.Row key={backup.id}>
+                                            <Table.Cell style={{ whiteSpace: 'nowrap' }}>{formatTime(backup.created_at)}</Table.Cell>
+                                            <Table.Cell style={{ whiteSpace: 'nowrap' }}>{backup.file_name}</Table.Cell>
+                                            <Table.Cell>
+                                                <Badge color={backup.status === 'completed' ? 'green' : backup.status === 'running' ? 'orange' : 'red'} variant="soft">
+                                                    {formatBackupStatus(backup.status)}
+                                                </Badge>
+                                            </Table.Cell>
+                                            <Table.Cell>{formatBytes(backup.size_bytes)}</Table.Cell>
+                                            <Table.Cell>
+                                                <Flex gap="2" wrap="wrap">
+                                                    <Button size="1" variant="soft" onClick={() => handleDownloadBackup(backup)} disabled={actionLoading || backup.status !== 'completed'}>
+                                                        <Download size={12} /> 下载
+                                                    </Button>
+                                                    <Button size="1" variant="soft" color="blue" onClick={() => handleRestoreBackup(backup)} disabled={actionLoading || backup.status !== 'completed'}>
+                                                        <RotateCw size={12} /> 恢复
+                                                    </Button>
+                                                    <Button size="1" variant="soft" color="red" onClick={() => handleDeleteBackup(backup)} disabled={actionLoading}>
+                                                        <Trash2 size={12} /> 删除
+                                                    </Button>
+                                                </Flex>
+                                            </Table.Cell>
+                                        </Table.Row>
+                                    ))}
+                                </Table.Body>
+                            </Table.Root>
                         )}
                     </Card>
                 </Tabs.Content>

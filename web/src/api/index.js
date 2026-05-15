@@ -268,6 +268,12 @@ export const databaseAPI = {
     instanceLogs: (id, tail) => api.get(`/plugins/database/instances/${id}/logs`, { params: { tail } }),
     connectionInfo: (id) => api.get(`/plugins/database/instances/${id}/connection`),
     rootPassword: (id) => api.get(`/plugins/database/instances/${id}/password`),
+    listBackups: (id) => api.get(`/plugins/database/instances/${id}/backups`),
+    createBackup: (id) => api.post(`/plugins/database/instances/${id}/backups`, {}, { timeout: 1800000 }),
+    deleteBackup: (id, backupId) => api.delete(`/plugins/database/instances/${id}/backups/${backupId}`),
+    restoreBackup: (id, backupId) => api.post(`/plugins/database/instances/${id}/backups/${backupId}/restore`, {}, { timeout: 1800000 }),
+    downloadBackup: (id, backupId) => api.get(`/plugins/database/instances/${id}/backups/${backupId}/download`, { responseType: 'blob', timeout: 1800000 }),
+    backupDownloadUrl: (id, backupId) => `/api/plugins/database/instances/${id}/backups/${backupId}/download`,
 
     listDatabases: (id) => api.get(`/plugins/database/instances/${id}/databases`),
     createDatabase: (id, data) => api.post(`/plugins/database/instances/${id}/databases`, data),

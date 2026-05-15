@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -556,6 +557,350 @@ func (s *Service) TestConnection(id uint) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return NewDBClient().Ping(ctx, inst)
+}
+
+// ListBackups returns local backup files recorded for an instance.
+func (s *Service) ListBackups(instanceID uint) ([]DatabaseBackup, error) {
+	if _, err := s.GetInstance(instanceID); err != nil {
+		return nil, err
+	}
+	var backups []DatabaseBackup
+	if err := s.db.Where("instance_id = ?", instanceID).Order("created_at DESC").Find(&backups).Error; err != nil {
+		return nil, err
+	}
+	return backups, nil
+}
+
+// CreateBackup creates a logical SQL dump for an instance.
+func (s *Service) CreateBackup(instanceID uint) (*DatabaseBackup, error) {
+	inst, err := s.GetInstance(instanceID)
+	if err != nil {
+		return nil, err
+	}
+	if inst.Status != "running" {
+		return nil, fmt.Errorf("instance is not running")
+	}
+	if inst.Engine == EngineRedis {
+		return nil, fmt.Errorf("Redis backup is not supported yet")
+	}
+
+	if err := s.TestConnection(instanceID); err != nil {
+		return nil, fmt.Errorf("connection check failed: %w", err)
+	}
+
+	backupDir := filepath.Join(s.dataDir, "backups", "database", fmt.Sprintf("%d-%s", inst.ID, sanitizeName(inst.Name)))
+	if err := os.MkdirAll(backupDir, 0755); err != nil {
+		return nil, fmt.Errorf("create backup dir: %w", err)
+	}
+	fileName := fmt.Sprintf("%s-%s.sql", sanitizeName(inst.Name), time.Now().Format("20060102150405"))
+	filePath := filepath.Join(backupDir, fileName)
+
+	backup := &DatabaseBackup{
+		InstanceID:   inst.ID,
+		InstanceName: inst.Name,
+		Engine:       inst.Engine,
+		Source:       inst.Source,
+		FilePath:     filePath,
+		FileName:     fileName,
+		Status:       "running",
+	}
+	if err := s.db.Create(backup).Error; err != nil {
+		return nil, err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+	cmd, err := s.databaseDumpCommand(ctx, inst)
+	if err != nil {
+		s.db.Model(backup).Updates(map[string]interface{}{"status": "failed", "error_msg": err.Error()})
+		return nil, err
+	}
+
+	outFile, err := os.Create(filePath)
+	if err != nil {
+		s.db.Model(backup).Updates(map[string]interface{}{"status": "failed", "error_msg": err.Error()})
+		return nil, err
+	}
+	cmd.Stdout = outFile
+	var stderrBuf strings.Builder
+	cmd.Stderr = &stderrBuf
+	runErr := cmd.Run()
+	closeErr := outFile.Close()
+	if runErr != nil {
+		_ = os.Remove(filePath)
+		errDetail := strings.TrimSpace(stderrBuf.String())
+		if len(errDetail) > 512 {
+			errDetail = errDetail[:512]
+		}
+		errMsg := fmt.Sprintf("%v - %s", runErr, errDetail)
+		s.db.Model(backup).Updates(map[string]interface{}{"status": "failed", "error_msg": errMsg})
+		return nil, fmt.Errorf("backup failed: %s", errMsg)
+	}
+	if closeErr != nil {
+		_ = os.Remove(filePath)
+		s.db.Model(backup).Updates(map[string]interface{}{"status": "failed", "error_msg": closeErr.Error()})
+		return nil, closeErr
+	}
+
+	info, err := os.Stat(filePath)
+	if err != nil {
+		s.db.Model(backup).Updates(map[string]interface{}{"status": "failed", "error_msg": err.Error()})
+		return nil, err
+	}
+	if err := s.db.Model(backup).Updates(map[string]interface{}{
+		"status":     "completed",
+		"size_bytes": info.Size(),
+	}).Error; err != nil {
+		return nil, err
+	}
+	return s.GetBackup(inst.ID, backup.ID)
+}
+
+// GetBackup returns a backup record belonging to an instance.
+func (s *Service) GetBackup(instanceID, backupID uint) (*DatabaseBackup, error) {
+	var backup DatabaseBackup
+	if err := s.db.Where("id = ? AND instance_id = ?", backupID, instanceID).First(&backup).Error; err != nil {
+		return nil, err
+	}
+	return &backup, nil
+}
+
+// DeleteBackup removes a backup file and its record.
+func (s *Service) DeleteBackup(instanceID, backupID uint) error {
+	backup, err := s.GetBackup(instanceID, backupID)
+	if err != nil {
+		return err
+	}
+	if backup.FilePath != "" {
+		_ = os.Remove(backup.FilePath)
+	}
+	return s.db.Delete(&DatabaseBackup{}, backup.ID).Error
+}
+
+// RestoreBackup restores a logical SQL dump into the instance.
+func (s *Service) RestoreBackup(instanceID, backupID uint) error {
+	inst, err := s.GetInstance(instanceID)
+	if err != nil {
+		return err
+	}
+	if inst.Status != "running" {
+		return fmt.Errorf("instance is not running")
+	}
+	backup, err := s.GetBackup(instanceID, backupID)
+	if err != nil {
+		return err
+	}
+	if backup.Status != "completed" {
+		return fmt.Errorf("backup is not completed")
+	}
+	if backup.Engine != inst.Engine {
+		return fmt.Errorf("backup engine %s does not match instance engine %s", backup.Engine, inst.Engine)
+	}
+	if _, err := os.Stat(backup.FilePath); err != nil {
+		return fmt.Errorf("backup file not found: %w", err)
+	}
+	if err := s.TestConnection(instanceID); err != nil {
+		return fmt.Errorf("connection check failed: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+	cmd, err := s.databaseRestoreCommand(ctx, inst)
+	if err != nil {
+		return err
+	}
+	inFile, err := os.Open(backup.FilePath)
+	if err != nil {
+		return err
+	}
+	defer inFile.Close()
+	cmd.Stdin = inFile
+	var stderrBuf strings.Builder
+	cmd.Stderr = &stderrBuf
+	if err := cmd.Run(); err != nil {
+		errDetail := strings.TrimSpace(stderrBuf.String())
+		if len(errDetail) > 512 {
+			errDetail = errDetail[:512]
+		}
+		return fmt.Errorf("restore failed: %v - %s", err, errDetail)
+	}
+	return nil
+}
+
+func (s *Service) databaseDumpCommand(ctx context.Context, inst *Instance) (*exec.Cmd, error) {
+	switch inst.Engine {
+	case EngineMySQL, EngineMariaDB:
+		if inst.IsRemote() {
+			if cmd := s.remoteMySQLDumpCommand(ctx, inst); cmd != nil {
+				return cmd, nil
+			}
+			cmd := exec.CommandContext(ctx, "mysqldump", "--single-transaction", "--routines", "--events", "--all-databases", "-h", inst.DBHost(), "-P", fmt.Sprintf("%d", inst.Port), "-u", inst.DBUsername())
+			cmd.Env = append(os.Environ(), "MYSQL_PWD="+inst.RootPassword)
+			return cmd, nil
+		}
+		return exec.CommandContext(ctx, "docker", "exec", "-e", "MYSQL_PWD="+inst.RootPassword, inst.ContainerName, mysqlDumpBinary(inst), "--single-transaction", "--routines", "--events", "--all-databases", "-u", inst.DBUsername()), nil
+	case EnginePostgres:
+		if inst.IsRemote() {
+			if cmd := s.remotePostgresDumpCommand(ctx, inst); cmd != nil {
+				return cmd, nil
+			}
+			cmd := exec.CommandContext(ctx, "pg_dumpall", "-h", inst.DBHost(), "-p", fmt.Sprintf("%d", inst.Port), "-U", inst.DBUsername())
+			cmd.Env = append(os.Environ(), "PGPASSWORD="+inst.RootPassword, "PGSSLMODE="+inst.DBSSLMode())
+			return cmd, nil
+		}
+		return exec.CommandContext(ctx, "docker", "exec", "-e", "PGPASSWORD="+inst.RootPassword, "-e", "PGSSLMODE="+inst.DBSSLMode(), inst.ContainerName, "pg_dumpall", "-U", inst.DBUsername()), nil
+	default:
+		return nil, fmt.Errorf("unsupported engine: %s", inst.Engine)
+	}
+}
+
+func (s *Service) databaseRestoreCommand(ctx context.Context, inst *Instance) (*exec.Cmd, error) {
+	switch inst.Engine {
+	case EngineMySQL, EngineMariaDB:
+		if inst.IsRemote() {
+			if cmd := s.remoteMySQLRestoreCommand(ctx, inst); cmd != nil {
+				return cmd, nil
+			}
+			cmd := exec.CommandContext(ctx, "mysql", "-h", inst.DBHost(), "-P", fmt.Sprintf("%d", inst.Port), "-u", inst.DBUsername())
+			cmd.Env = append(os.Environ(), "MYSQL_PWD="+inst.RootPassword)
+			return cmd, nil
+		}
+		return exec.CommandContext(ctx, "docker", "exec", "-i", "-e", "MYSQL_PWD="+inst.RootPassword, inst.ContainerName, mysqlClientBinary(inst), "-u", inst.DBUsername()), nil
+	case EnginePostgres:
+		if inst.IsRemote() {
+			if cmd := s.remotePostgresRestoreCommand(ctx, inst); cmd != nil {
+				return cmd, nil
+			}
+			cmd := exec.CommandContext(ctx, "psql", "-h", inst.DBHost(), "-p", fmt.Sprintf("%d", inst.Port), "-U", inst.DBUsername(), "-d", "postgres")
+			cmd.Env = append(os.Environ(), "PGPASSWORD="+inst.RootPassword, "PGSSLMODE="+inst.DBSSLMode())
+			return cmd, nil
+		}
+		return exec.CommandContext(ctx, "docker", "exec", "-i", "-e", "PGPASSWORD="+inst.RootPassword, "-e", "PGSSLMODE="+inst.DBSSLMode(), inst.ContainerName, "psql", "-U", inst.DBUsername(), "-d", "postgres"), nil
+	default:
+		return nil, fmt.Errorf("unsupported engine: %s", inst.Engine)
+	}
+}
+
+func (s *Service) remoteMySQLDumpCommand(ctx context.Context, inst *Instance) *exec.Cmd {
+	if _, err := exec.LookPath("docker"); err != nil {
+		return nil
+	}
+	host := inst.DBHost()
+	args := append([]string{"run", "--rm"}, dockerNetworkArgs(host)...)
+	args = append(args,
+		"-e", "MYSQL_PWD="+inst.RootPassword,
+		mysqlClientImage(inst),
+		mysqlDumpBinary(inst),
+		"--single-transaction", "--routines", "--events", "--all-databases",
+		"-h", host,
+		"-P", fmt.Sprintf("%d", inst.Port),
+		"-u", inst.DBUsername(),
+	)
+	return exec.CommandContext(ctx, "docker", args...)
+}
+
+func (s *Service) remoteMySQLRestoreCommand(ctx context.Context, inst *Instance) *exec.Cmd {
+	if _, err := exec.LookPath("docker"); err != nil {
+		return nil
+	}
+	host := inst.DBHost()
+	args := append([]string{"run", "--rm", "-i"}, dockerNetworkArgs(host)...)
+	args = append(args,
+		"-e", "MYSQL_PWD="+inst.RootPassword,
+		mysqlClientImage(inst),
+		mysqlClientBinary(inst),
+		"-h", host,
+		"-P", fmt.Sprintf("%d", inst.Port),
+		"-u", inst.DBUsername(),
+	)
+	return exec.CommandContext(ctx, "docker", args...)
+}
+
+func (s *Service) remotePostgresDumpCommand(ctx context.Context, inst *Instance) *exec.Cmd {
+	if _, err := exec.LookPath("docker"); err != nil {
+		return nil
+	}
+	host := inst.DBHost()
+	args := append([]string{"run", "--rm"}, dockerNetworkArgs(host)...)
+	args = append(args,
+		"-e", "PGPASSWORD="+inst.RootPassword,
+		"-e", "PGSSLMODE="+inst.DBSSLMode(),
+		postgresClientImage(inst),
+		"pg_dumpall",
+		"-h", host,
+		"-p", fmt.Sprintf("%d", inst.Port),
+		"-U", inst.DBUsername(),
+	)
+	return exec.CommandContext(ctx, "docker", args...)
+}
+
+func (s *Service) remotePostgresRestoreCommand(ctx context.Context, inst *Instance) *exec.Cmd {
+	if _, err := exec.LookPath("docker"); err != nil {
+		return nil
+	}
+	host := inst.DBHost()
+	args := append([]string{"run", "--rm", "-i"}, dockerNetworkArgs(host)...)
+	args = append(args,
+		"-e", "PGPASSWORD="+inst.RootPassword,
+		"-e", "PGSSLMODE="+inst.DBSSLMode(),
+		postgresClientImage(inst),
+		"psql",
+		"-h", host,
+		"-p", fmt.Sprintf("%d", inst.Port),
+		"-U", inst.DBUsername(),
+		"-d", "postgres",
+	)
+	return exec.CommandContext(ctx, "docker", args...)
+}
+
+func mysqlClientImage(inst *Instance) string {
+	if inst.Engine == EngineMariaDB {
+		if strings.TrimSpace(inst.Version) != "" {
+			return "mariadb:" + strings.TrimSpace(inst.Version)
+		}
+		return "mariadb:11.8"
+	}
+	if strings.TrimSpace(inst.Version) != "" {
+		return "mysql:" + strings.TrimSpace(inst.Version)
+	}
+	return "mysql:8.4"
+}
+
+func mysqlDumpBinary(inst *Instance) string {
+	if inst.Engine == EngineMariaDB {
+		return "mariadb-dump"
+	}
+	return "mysqldump"
+}
+
+func mysqlClientBinary(inst *Instance) string {
+	if inst.Engine == EngineMariaDB {
+		return "mariadb"
+	}
+	return "mysql"
+}
+
+func postgresClientImage(inst *Instance) string {
+	if strings.TrimSpace(inst.Version) != "" {
+		return "postgres:" + strings.TrimSpace(inst.Version) + "-alpine"
+	}
+	return "postgres:17-alpine"
+}
+
+func dockerNetworkArgs(host string) []string {
+	if runtime.GOOS == "linux" && isLoopbackHost(host) {
+		return []string{"--network", "host"}
+	}
+	return nil
+}
+
+func isLoopbackHost(host string) bool {
+	switch strings.ToLower(strings.TrimSpace(host)) {
+	case "", "localhost", "127.0.0.1", "::1":
+		return true
+	default:
+		return false
+	}
 }
 
 // ExecuteQuery executes a read-only query against a running database instance.

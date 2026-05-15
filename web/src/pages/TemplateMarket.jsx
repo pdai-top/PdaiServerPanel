@@ -216,8 +216,8 @@ export default function TemplateMarket() {
                                     {selectedTemplate.framework && (
                                         <Text size="2"><strong>{t('appstore.framework_filter')}:</strong> {selectedTemplate.framework}</Text>
                                     )}
-                                    <Text size="2"><strong>Git:</strong> {selectedTemplate.git_url}</Text>
-                                    <Text size="2"><strong>Branch:</strong> {selectedTemplate.branch || 'main'}</Text>
+                                    <Text size="2"><strong>Git：</strong>{selectedTemplate.git_url}</Text>
+                                    <Text size="2"><strong>分支：</strong>{selectedTemplate.branch || 'main'}</Text>
                                 </Flex>
                             </Card>
                         )}

@@ -348,7 +348,7 @@ export default function FirewallManager() {
             <Card mb="4" style={{ background: 'var(--cp-card)', border: '1px solid var(--cp-border)' }}>
                 <Flex gap="5" p="1" wrap="wrap">
                     <Flex direction="column" gap="1">
-                        <Text size="1" color="gray">Status</Text>
+                        <Text size="1" color="gray">状态</Text>
                         <Badge color="green" size="1">{t('firewall.status_running')}</Badge>
                     </Flex>
                     {status?.version && (

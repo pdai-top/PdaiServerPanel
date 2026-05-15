@@ -187,7 +187,7 @@ export default function SupervisorManager() {
                                         <Table.Row>
                                             <Table.ColumnHeaderCell>{t('supervisor.process_name')}</Table.ColumnHeaderCell>
                                             <Table.ColumnHeaderCell>{t('supervisor.status')}</Table.ColumnHeaderCell>
-                                            <Table.ColumnHeaderCell>PID</Table.ColumnHeaderCell>
+                                            <Table.ColumnHeaderCell>进程号</Table.ColumnHeaderCell>
                                             <Table.ColumnHeaderCell>{t('supervisor.command')}</Table.ColumnHeaderCell>
                                             <Table.ColumnHeaderCell>{t('supervisor.autostart')}</Table.ColumnHeaderCell>
                                             <Table.ColumnHeaderCell>{t('supervisor.autorestart')}</Table.ColumnHeaderCell>

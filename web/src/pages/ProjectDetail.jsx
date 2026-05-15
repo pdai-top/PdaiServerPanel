@@ -1160,7 +1160,7 @@ export default function ProjectDetail() {
                                     <Table.Root variant="surface">
                                         <Table.Header>
                                             <Table.Row>
-                                                <Table.ColumnHeaderCell>PR</Table.ColumnHeaderCell>
+                                                <Table.ColumnHeaderCell>拉取请求</Table.ColumnHeaderCell>
                                                 <Table.ColumnHeaderCell>{t('deploy.preview_branch')}</Table.ColumnHeaderCell>
                                                 <Table.ColumnHeaderCell>{t('deploy.preview_domain')}</Table.ColumnHeaderCell>
                                                 <Table.ColumnHeaderCell>{t('common.status')}</Table.ColumnHeaderCell>
@@ -1186,7 +1186,7 @@ export default function ProjectDetail() {
                                                             <Text weight="medium">#{p.pr_number}</Text>
                                                             {p.is_fork_pr && (
                                                                 <Tooltip content={p.head_repo || ''}>
-                                                                    <Badge size="1" color="orange">fork</Badge>
+                                                                    <Badge size="1" color="orange">分支</Badge>
                                                                 </Tooltip>
                                                             )}
                                                         </Flex>

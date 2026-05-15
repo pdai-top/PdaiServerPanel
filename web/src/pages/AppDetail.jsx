@@ -205,7 +205,7 @@ export default function AppDetail() {
                                             onChange={e => handleFieldChange(field.env_variable, e.target.value)}
                                             style={{ width: '100%', padding: '6px 8px', borderRadius: 6, border: '1px solid var(--gray-6)', background: 'var(--color-background)' }}
                                         >
-                                            <option value="">Select...</option>
+                                            <option value="">请选择...</option>
                                             {field.options.map(o => (
                                                 <option key={o.value} value={o.value}>{o.label}</option>
                                             ))}

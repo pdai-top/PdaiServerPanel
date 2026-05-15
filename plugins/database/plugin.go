@@ -36,7 +36,7 @@ func (p *Plugin) Metadata() pluginpkg.Metadata {
 // Init initialises the database plugin: migrates DB, registers routes.
 func (p *Plugin) Init(ctx *pluginpkg.Context) error {
 	// Migrate models.
-	if err := ctx.DB.AutoMigrate(&Instance{}, &Database{}, &DatabaseUser{}); err != nil {
+	if err := ctx.DB.AutoMigrate(&Instance{}, &Database{}, &DatabaseUser{}, &DatabaseBackup{}); err != nil {
 		return fmt.Errorf("migrate: %w", err)
 	}
 
@@ -68,6 +68,11 @@ func (p *Plugin) Init(ctx *pluginpkg.Context) error {
 	r.GET("/instances/:id/connection", p.handler.GetConnectionInfo)
 	a.GET("/instances/:id/password", p.handler.GetRootPassword) // sensitive
 	a.POST("/instances/:id/test", p.handler.TestConnection)
+	r.GET("/instances/:id/backups", p.handler.ListBackups)
+	a.POST("/instances/:id/backups", p.handler.CreateBackup)
+	a.GET("/instances/:id/backups/:backup_id/download", p.handler.DownloadBackup)
+	a.POST("/instances/:id/backups/:backup_id/restore", p.handler.RestoreBackup)
+	a.DELETE("/instances/:id/backups/:backup_id", p.handler.DeleteBackup)
 
 	// Database CRUD (admin)
 	r.GET("/instances/:id/databases", p.handler.ListDatabases)

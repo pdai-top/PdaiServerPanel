@@ -588,7 +588,7 @@ export default function MonitoringDashboard({ embedded }) {
                                             <Table.ColumnHeaderCell>{t('monitoring.operator')}</Table.ColumnHeaderCell>
                                             <Table.ColumnHeaderCell>{t('monitoring.threshold')}</Table.ColumnHeaderCell>
                                             <Table.ColumnHeaderCell>{t('common.enabled')}</Table.ColumnHeaderCell>
-                                            <Table.ColumnHeaderCell>AI</Table.ColumnHeaderCell>
+                                            <Table.ColumnHeaderCell>人工智能</Table.ColumnHeaderCell>
                                             <Table.ColumnHeaderCell>{t('common.actions')}</Table.ColumnHeaderCell>
                                         </Table.Row>
                                     </Table.Header>
@@ -618,9 +618,9 @@ export default function MonitoringDashboard({ embedded }) {
                                                 </Table.Cell>
                                                 <Table.Cell>
                                                     {rule.auto_heal_mode === 'auto' ? (
-                                                        <Badge size="1" color="orange">Auto-Fix</Badge>
+                                                        <Badge size="1" color="orange">自动修复</Badge>
                                                     ) : rule.auto_heal_mode === 'suggest' ? (
-                                                        <Badge size="1" color="blue">Suggest</Badge>
+                                                        <Badge size="1" color="blue">建议</Badge>
                                                     ) : (
                                                         <Badge size="1" variant="soft" color="gray">—</Badge>
                                                     )}
@@ -665,9 +665,9 @@ export default function MonitoringDashboard({ embedded }) {
                                             <Table.ColumnHeaderCell>{t('audit.time')}</Table.ColumnHeaderCell>
                                             <Table.ColumnHeaderCell>{t('monitoring.alert_name')}</Table.ColumnHeaderCell>
                                             <Table.ColumnHeaderCell>{t('monitoring.metric')}</Table.ColumnHeaderCell>
-                                            <Table.ColumnHeaderCell>Value</Table.ColumnHeaderCell>
+                                            <Table.ColumnHeaderCell>值</Table.ColumnHeaderCell>
                                             <Table.ColumnHeaderCell>{t('monitoring.threshold')}</Table.ColumnHeaderCell>
-                                            <Table.ColumnHeaderCell>Notified</Table.ColumnHeaderCell>
+                                            <Table.ColumnHeaderCell>已通知</Table.ColumnHeaderCell>
                                         </Table.Row>
                                     </Table.Header>
                                     <Table.Body>

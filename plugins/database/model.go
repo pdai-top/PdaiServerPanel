@@ -188,6 +188,25 @@ type DatabaseUser struct {
 // TableName overrides GORM table name with plugin prefix.
 func (DatabaseUser) TableName() string { return "plugin_database_users" }
 
+// DatabaseBackup represents a logical backup file for an Instance.
+type DatabaseBackup struct {
+	ID           uint       `gorm:"primaryKey" json:"id"`
+	InstanceID   uint       `gorm:"index;not null" json:"instance_id"`
+	InstanceName string     `gorm:"size:128;not null" json:"instance_name"`
+	Engine       EngineType `gorm:"size:32;not null" json:"engine"`
+	Source       string     `gorm:"size:16;default:local" json:"source"`
+	FilePath     string     `gorm:"size:512;not null" json:"file_path"`
+	FileName     string     `gorm:"size:255;not null" json:"file_name"`
+	SizeBytes    int64      `json:"size_bytes"`
+	Status       string     `gorm:"size:16;default:completed" json:"status"`
+	ErrorMsg     string     `gorm:"type:text" json:"error_msg,omitempty"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+}
+
+// TableName overrides GORM table name with plugin prefix.
+func (DatabaseBackup) TableName() string { return "plugin_database_backups" }
+
 // ── Request / Response structs ──
 
 // CreateInstanceRequest is the input for creating a new database instance.
@@ -246,4 +265,9 @@ type ExecuteQueryRequest struct {
 	Query    string `json:"query" binding:"required"`
 	Database string `json:"database"`
 	Limit    int    `json:"limit"`
+}
+
+// CreateBackupRequest creates a database backup.
+type CreateBackupRequest struct {
+	Note string `json:"note"`
 }
