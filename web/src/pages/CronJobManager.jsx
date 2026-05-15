@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useMemo } from 'react'
 import {
     Box, Flex, Text, Card, Badge, Button, Table, Dialog, TextField,
     Switch, TextArea, Heading, Callout, ScrollArea, Tabs,
-    Select,
+    Select, Spinner,
 } from '@radix-ui/themes'
 import {
     Clock, Play, Plus, Trash2,
@@ -61,6 +61,10 @@ export default function CronJobManager() {
         () => tasks.find(task => task.id === logTaskId),
         [tasks, logTaskId]
     )
+    const hasRunningTasks = useMemo(
+        () => tasks.some(task => task.last_status === 'running'),
+        [tasks]
+    )
 
     const fetchTasks = useCallback(async () => {
         try {
@@ -88,15 +92,23 @@ export default function CronJobManager() {
         }
     }, [])
 
-    const fetchAll = useCallback(async () => {
-        setLoading(true)
+    const fetchAll = useCallback(async (silent = false) => {
+        if (!silent) setLoading(true)
         await fetchTasks()
         await fetchLogs(logTaskId)
         await fetchDatabaseInstances()
-        setLoading(false)
+        if (!silent) setLoading(false)
     }, [fetchTasks, fetchLogs, fetchDatabaseInstances, logTaskId])
 
     useEffect(() => { fetchAll() }, [fetchAll])
+
+    useEffect(() => {
+        if (!hasRunningTasks) return undefined
+        const timer = window.setInterval(() => {
+            fetchAll(true)
+        }, 2000)
+        return () => window.clearInterval(timer)
+    }, [fetchAll, hasRunningTasks])
 
     const openCreate = () => {
         setEditId(null)
@@ -164,7 +176,12 @@ export default function CronJobManager() {
         try {
             await cronjobAPI.triggerTask(id)
             setTriggerConfirm(null)
-            setTimeout(() => fetchAll(), 1000)
+            setTasks(prev => prev.map(task => (
+                task.id === id
+                    ? { ...task, last_status: 'running', last_run_at: new Date().toISOString() }
+                    : task
+            )))
+            setTimeout(() => fetchAll(true), 1000)
         } catch (e) {
             alert(e?.response?.data?.error || e.message)
         }
@@ -246,6 +263,7 @@ export default function CronJobManager() {
                                 </Table.Header>
                                 <Table.Body>
                                     {tasks.map(task => {
+                                        const isRunning = task.last_status === 'running'
                                         return (
                                             <Table.Row
                                                 key={task.id}
@@ -281,8 +299,9 @@ export default function CronJobManager() {
                                                 </Table.Cell>
                                                 <Table.Cell>
                                                     <Flex gap="1" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
-                                                        <Button size="1" variant="soft" color="green" onClick={() => setTriggerConfirm(task.id)}>
-                                                            <Play size={14} /> {t('cronjob.action_start')}
+                                                        <Button size="1" variant="soft" color="green" disabled={isRunning} onClick={() => setTriggerConfirm(task.id)}>
+                                                            {isRunning ? <Spinner size="1" /> : <Play size={14} />}
+                                                            {isRunning ? t('cronjob.status_running') : t('cronjob.action_start')}
                                                         </Button>
                                                         <Button size="1" variant="soft" onClick={() => viewTaskLogs(task.id)}>
                                                             <Timer size={14} /> {t('cronjob.action_diary')}

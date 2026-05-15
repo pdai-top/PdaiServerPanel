@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
@@ -476,6 +478,10 @@ func (s *Service) runCommand(task CronTask) (*CronLog, error) {
 	if attempts > 10 {
 		attempts = 10 // hard cap on retries
 	}
+	s.db.Model(&CronTask{}).Where("id = ?", task.ID).Updates(map[string]interface{}{
+		"last_run_at": time.Now(),
+		"last_status": "running",
+	})
 
 	for attempt := 0; attempt < attempts; attempt++ {
 		// Wait before retry (skip wait on first attempt).
@@ -495,6 +501,7 @@ func (s *Service) runCommand(task CronTask) (*CronLog, error) {
 		if ctx.Err() == context.DeadlineExceeded {
 			status = "timeout"
 			exitCode = -1
+			outStr = appendExecutionDetail(outStr, "execution timed out")
 		} else if err != nil {
 			status = "failed"
 			if exitErr, ok := err.(*exec.ExitError); ok {
@@ -502,6 +509,7 @@ func (s *Service) runCommand(task CronTask) (*CronLog, error) {
 			} else {
 				exitCode = -1
 			}
+			outStr = appendExecutionDetail(outStr, err.Error())
 		}
 
 		lastLog = &CronLog{
@@ -568,6 +576,20 @@ func (s *Service) runCommand(task CronTask) (*CronLog, error) {
 	return lastLog, nil
 }
 
+func appendExecutionDetail(output, detail string) string {
+	detail = strings.TrimSpace(detail)
+	if detail == "" {
+		return output
+	}
+	if strings.TrimSpace(output) == "" {
+		return detail
+	}
+	if strings.Contains(output, detail) {
+		return output
+	}
+	return output + "\n\n[execution error] " + detail
+}
+
 func (s *Service) runTaskAction(ctx context.Context, task CronTask) (string, error) {
 	switch normalizeTaskType(task.Type) {
 	case taskTypeDatabaseBackup:
@@ -578,9 +600,9 @@ func (s *Service) runTaskAction(ctx context.Context, task CronTask) (string, err
 }
 
 func (s *Service) runShellTask(ctx context.Context, task CronTask) (string, error) {
-	// execx.BashContext enforces the timeout across the full pipeline
-	// tree, so a runaway cron task cannot outlive its timeout budget.
-	cmd := execx.BashContext(ctx, task.Command)
+	// Use POSIX sh for portability across lightweight systems such as OpenWrt,
+	// which commonly do not ship bash.
+	cmd := shellCommandContext(ctx, task.Command)
 	if task.WorkingDir != "" {
 		cmd.Dir = task.WorkingDir
 	}
@@ -589,6 +611,21 @@ func (s *Service) runShellTask(ctx context.Context, task CronTask) (string, erro
 	cmd.Stderr = output
 	err := cmd.Run()
 	return output.String(), err
+}
+
+func shellCommandContext(ctx context.Context, script string) *exec.Cmd {
+	for _, shell := range []string{"/bin/sh", "/bin/ash", "/usr/bin/sh", "/usr/bin/ash"} {
+		if info, err := os.Stat(shell); err == nil && !info.IsDir() {
+			return execx.CommandContext(ctx, shell, "-c", script)
+		}
+	}
+	if shell, err := exec.LookPath("sh"); err == nil {
+		return execx.CommandContext(ctx, shell, "-c", script)
+	}
+	if shell, err := exec.LookPath("ash"); err == nil {
+		return execx.CommandContext(ctx, shell, "-c", script)
+	}
+	return execx.CommandContext(ctx, "sh", "-c", script)
 }
 
 func (s *Service) runDatabaseBackupTask(task CronTask) (string, error) {
