@@ -21,11 +21,10 @@ import (
 // dockerAvailable, dockerError) that are read by requireDocker from every
 // request goroutine and written by tryReconnect / dockerStatus when the
 // daemon appears/disappears. Without the lock these fields were racing
-// (go-review Group A finding). The service/handler client pointers that
-// mirror p.client are updated inside the same critical section.
+// (go-review Group A finding). The handler client pointer that mirrors
+// p.client is updated inside the same critical section.
 type Plugin struct {
 	client          *Client
-	svc             *Service
 	handler         *Handler
 	dockerAvailable bool
 	dockerError     string
@@ -95,13 +94,8 @@ func (p *Plugin) Init(ctx *pluginpkg.Context) error {
 	}
 
 	// Migrate models.
-	if err := ctx.DB.AutoMigrate(&Stack{}); err != nil {
-		return err
-	}
-
-	// Create service and handler (may use nil client, handler checks dockerAvailable).
-	p.svc = NewService(ctx.DB, client, ctx.DataDir, ctx.Logger)
-	p.handler = NewHandler(p.svc, client)
+	// Create handler (may use nil client, handler checks dockerAvailable).
+	p.handler = NewHandler(client)
 	p.handler.reconnectFn = p.tryReconnect
 
 	// Register API routes under /api/plugins/docker/
@@ -125,30 +119,17 @@ func (p *Plugin) Init(ctx *pluginpkg.Context) error {
 
 	o := ctx.OperatorRouter // operator+ (operational actions)
 
-	// Stacks (read + operator operations + admin config)
-	r.GET("/stacks", p.requireDocker(), p.handler.ListStacks)
-	a.POST("/stacks", p.requireDocker(), p.handler.CreateStack)
-	r.GET("/stacks/:id", p.requireDocker(), p.handler.GetStack)
-	a.PUT("/stacks/:id", p.requireDocker(), p.handler.UpdateStack)
-	a.DELETE("/stacks/:id", p.requireDocker(), p.handler.DeleteStack)
-	o.POST("/stacks/:id/up", p.requireDocker(), p.handler.StackUp)
-	o.POST("/stacks/:id/down", p.requireDocker(), p.handler.StackDown)
-	o.POST("/stacks/:id/restart", p.requireDocker(), p.handler.StackRestart)
-	o.POST("/stacks/:id/pull", p.requireDocker(), p.handler.StackPull)
-	// Logs can contain secrets, DB credentials, and request bodies, so they
-	// sit one tier above plain read (Group A authz finding).
-	o.GET("/stacks/:id/logs", p.requireDocker(), p.handler.StackLogs)
-
 	// Containers (read + operator operations + admin mutations)
 	r.GET("/containers", p.requireDocker(), p.handler.ListContainers)
 	r.GET("/containers/:id", p.requireDocker(), p.handler.GetContainer)
 	a.POST("/containers/run", p.requireDocker(), p.handler.RunContainer)
+	a.POST("/containers/run/stream", p.requireDocker(), p.handler.RunContainerStream)
 	a.PUT("/containers/:id", p.requireDocker(), p.handler.UpdateContainer)
 	o.POST("/containers/:id/start", p.requireDocker(), p.handler.StartContainer)
 	o.POST("/containers/:id/stop", p.requireDocker(), p.handler.StopContainer)
 	o.POST("/containers/:id/restart", p.requireDocker(), p.handler.RestartContainer)
 	a.DELETE("/containers/:id", p.requireDocker(), p.handler.RemoveContainer)
-	// Container logs can leak secrets same as stack logs (Group A authz).
+	// Container logs can leak secrets (Group A authz).
 	o.GET("/containers/:id/logs", p.requireDocker(), p.handler.ContainerLogs)
 	r.GET("/containers/:id/stats", p.requireDocker(), p.handler.ContainerStats)
 
@@ -171,7 +152,6 @@ func (p *Plugin) Init(ctx *pluginpkg.Context) error {
 
 	// WebSocket log streaming — operator tier (same rationale as HTTP logs).
 	o.GET("/containers/:id/logs/ws", p.requireDocker(), p.handler.ContainerLogsWS)
-	o.GET("/stacks/:id/logs/ws", p.requireDocker(), p.handler.StackLogsWS)
 
 	ctx.Logger.Info("Docker plugin routes registered", "docker_available", p.dockerAvailable)
 	return nil
@@ -227,9 +207,6 @@ func (p *Plugin) tryReconnect() bool {
 	p.client = client
 	p.dockerAvailable = true
 	p.dockerError = ""
-	if p.svc != nil {
-		p.svc.client = client
-	}
 	if p.handler != nil {
 		p.handler.client = client
 	}
@@ -589,7 +566,7 @@ func (p *Plugin) checkDockerAlreadyReady(writeSSE func(string), writeEvent func(
 			return false
 		}
 	case RuntimeDocker:
-		// docker binary + compose plugin both required for stack operations.
+		// docker binary + compose plugin both required for compose-based operations.
 		if _, err := exec.LookPath("docker"); err != nil {
 			return false
 		}
@@ -646,7 +623,7 @@ func (p *Plugin) checkDockerAlreadyReady(writeSSE func(string), writeEvent func(
 connected:
 
 	// Best-effort runtime + compose version lines for the SSE stream.
-	// Missing compose is a soft failure — app-store stacks still work if
+	// Missing compose is a soft failure — app-store managed services still work if
 	// only one of the compose implementations is present.
 	runtimeVer := RuntimeVersion()
 	composeOut, _ := exec.Command("docker", "compose", "version").CombinedOutput()
@@ -868,9 +845,6 @@ log "Docker → Podman switch completed."
 	p.client = nil
 	p.dockerAvailable = false
 	p.dockerError = "runtime switched to Podman; reconnect pending"
-	if p.svc != nil {
-		p.svc.client = nil
-	}
 	if p.handler != nil {
 		p.handler.client = nil
 	}

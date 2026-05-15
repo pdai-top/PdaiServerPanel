@@ -223,7 +223,7 @@ export default function BackupManager({ embedded }) {
                 <Box>
                     <Text size="2" weight="bold" mb="1" style={{ display: 'block' }}>{t('backup.local_path')}</Text>
                     <TextField.Root
-                        placeholder="/var/backups/pdai"
+                        placeholder="./data/backups"
                         value={config.target.local_path || ''}
                         onChange={e => updateTarget('local_path', e.target.value)}
                     />

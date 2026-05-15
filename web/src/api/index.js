@@ -193,18 +193,6 @@ export const dockerAPI = {
     status: () => api.get('/plugins/docker/status'),
     switchPodman: () => api.post('/plugins/docker/switch-podman', {}, { timeout: 600000 }),
 
-    // Stacks
-    listStacks: () => api.get('/plugins/docker/stacks'),
-    getStack: (id) => api.get(`/plugins/docker/stacks/${id}`),
-    createStack: (data) => api.post('/plugins/docker/stacks', data),
-    updateStack: (id, data) => api.put(`/plugins/docker/stacks/${id}`, data),
-    deleteStack: (id) => api.delete(`/plugins/docker/stacks/${id}`),
-    stackUp: (id) => api.post(`/plugins/docker/stacks/${id}/up`),
-    stackDown: (id) => api.post(`/plugins/docker/stacks/${id}/down`),
-    stackRestart: (id) => api.post(`/plugins/docker/stacks/${id}/restart`),
-    stackPull: (id) => api.post(`/plugins/docker/stacks/${id}/pull`),
-    stackLogs: (id, tail) => api.get(`/plugins/docker/stacks/${id}/logs`, { params: { tail } }),
-
     // Daemon config
     getDaemonConfig: () => api.get('/plugins/docker/daemon-config'),
     updateDaemonConfig: (data) => api.put('/plugins/docker/daemon-config', data, { timeout: 60000 }),
@@ -213,6 +201,7 @@ export const dockerAPI = {
     listContainers: (all = true) => api.get('/plugins/docker/containers', { params: { all } }),
     getContainer: (id) => api.get(`/plugins/docker/containers/${id}`),
     runContainer: (data) => api.post('/plugins/docker/containers/run', data, { timeout: 300000 }),
+    runContainerStreamUrl: () => '/api/plugins/docker/containers/run/stream',
     updateContainer: (id, data) => api.put(`/plugins/docker/containers/${id}`, data, { timeout: 300000 }),
     startContainer: (id) => api.post(`/plugins/docker/containers/${id}/start`),
     stopContainer: (id) => api.post(`/plugins/docker/containers/${id}/stop`),

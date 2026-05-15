@@ -219,7 +219,7 @@ type CreateSiteRequest struct {
 	PHPVersion   string   `json:"php_version" binding:"required"`
 	RuntimeType  string   `json:"runtime_type" binding:"required"` // "fpm" | "frankenphp"
 	RuntimeID    uint     `json:"runtime_id"`                      // required for FPM
-	RootPath     string   `json:"root_path"`                       // default /var/www/{domain}
+	RootPath     string   `json:"root_path"`                       // default {PDAI_DATA_DIR}/www/{domain}
 	WorkerMode   bool     `json:"worker_mode"`                     // FrankenPHP only
 	WorkerScript string   `json:"worker_script"`                   // FrankenPHP worker script path
 	Extensions   []string `json:"extensions"`                      // FrankenPHP per-site extensions

@@ -78,6 +78,11 @@ const DEFAULT_FORM = {
     dns_provider_id: null,
 }
 
+const DEFAULT_DATA_DIR = './data'
+
+const defaultSiteRootPath = (domain) => `${DEFAULT_DATA_DIR}/www/${domain || 'example.com'}/index`
+const defaultErrorPagePath = (domain) => `${DEFAULT_DATA_DIR}/www/${domain || 'example.com'}/default`
+
 const buildCaddyBlockFromForm = (source) => {
     const domains = hostDomainListFromForm(source)
     const domain = domains[0] || 'example.com'
@@ -134,7 +139,7 @@ const buildCaddyBlockFromForm = (source) => {
     if (source.host_type === 'redirect') {
         lines.push(`    redir ${source.redirect_url || 'https://example.com'}{uri} ${Number(source.redirect_code) === 302 ? 'temporary' : 'permanent'}`)
     } else if (source.host_type === 'static') {
-        lines.push(`    root * ${source.root_path || `/opt/www/${domain}`}`)
+        lines.push(`    root * ${source.root_path || defaultSiteRootPath(domain)}`)
         lines.push(source.directory_browse ? '    file_server browse' : '    file_server')
     } else {
         const upstreams = (source.upstreams || []).map((u) => u.address.trim()).filter(Boolean)
@@ -320,6 +325,25 @@ function HostFormDialog({ open, onClose, onSaved, host }) {
         setForm({ ...form, upstreams })
     }
 
+    const updateDomain = (value) => {
+        const nextPrimary = parseAdditionalDomains(value)[0] || value.trim()
+        setForm((prev) => {
+            const prevPrimary = parseAdditionalDomains(prev.domain)[0] || prev.domain.trim()
+            const prevRoot = defaultSiteRootPath(prevPrimary)
+            const prevError = defaultErrorPagePath(prevPrimary)
+            return {
+                ...prev,
+                domain: value,
+                root_path: !isEdit && (!prev.root_path || prev.root_path === prevRoot)
+                    ? defaultSiteRootPath(nextPrimary)
+                    : prev.root_path,
+                error_page_path: !isEdit && (!prev.error_page_path || prev.error_page_path === prevError)
+                    ? defaultErrorPagePath(nextPrimary)
+                    : prev.error_page_path,
+            }
+        })
+    }
+
     const buildDefaultCaddyBlock = useCallback(() => buildCaddyBlockFromForm(form), [form])
 
     useEffect(() => {
@@ -422,7 +446,7 @@ function HostFormDialog({ open, onClose, onSaved, host }) {
                             <TextField.Root
                                 placeholder="多个域名时使用逗号分隔填写"
                                 value={form.domain}
-                                onChange={(e) => setForm({ ...form, domain: e.target.value })}
+                                onChange={(e) => updateDomain(e.target.value)}
                                 size="2"
                             />
                         </Flex>
@@ -510,7 +534,7 @@ function HostFormDialog({ open, onClose, onSaved, host }) {
                                         <Flex direction="column" gap="1">
                                             <Text size="2" weight="medium">{t('host.root_path')}</Text>
                                             <TextField.Root
-                                                placeholder="/var/www/my-site"
+                                                placeholder={defaultSiteRootPath(primaryDomain)}
                                                 value={form.root_path || ''}
                                                 onChange={(e) => setForm({ ...form, root_path: e.target.value })}
                                                 size="2"
@@ -759,7 +783,7 @@ function HostFormDialog({ open, onClose, onSaved, host }) {
                                         <TextField.Root
                                             value={form.error_page_path}
                                             onChange={(e) => setForm({ ...form, error_page_path: e.target.value })}
-                                            placeholder="/var/lib/pdai/error_pages"
+                                            placeholder={defaultErrorPagePath(primaryDomain)}
                                         />
                                     </Box>
 

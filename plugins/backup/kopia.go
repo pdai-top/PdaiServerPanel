@@ -21,6 +21,7 @@ import (
 // KopiaClient wraps the Kopia CLI for repository and snapshot operations.
 type KopiaClient struct {
 	configFile string // --config-file path for isolation
+	dataDir    string
 	logger     *slog.Logger
 }
 
@@ -28,6 +29,7 @@ type KopiaClient struct {
 func NewKopiaClient(dataDir string, logger *slog.Logger) *KopiaClient {
 	return &KopiaClient{
 		configFile: filepath.Join(dataDir, "kopia.config"),
+		dataDir:    dataDir,
 		logger:     logger,
 	}
 }
@@ -391,7 +393,7 @@ func (k *KopiaClient) targetArgs(cfg *BackupConfig) []string {
 	default: // "local"
 		path := cfg.LocalPath
 		if path == "" {
-			path = "/var/backups/pdai"
+			path = filepath.Join(k.dataDir, "backups")
 		}
 		os.MkdirAll(path, 0755)
 		return []string{

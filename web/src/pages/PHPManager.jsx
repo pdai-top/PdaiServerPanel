@@ -3,6 +3,8 @@ import { Box, Flex, Grid, Card, Button, IconButton, Text, Heading, Badge, Dialog
 import { FileCode, Plus, Play, Square, RotateCcw, Trash2, RefreshCw, AlertCircle, CheckCircle2, Globe, Sparkles, Settings, Package, Info } from 'lucide-react'
 import { phpAPI, dockerAPI } from '../api/index.js'
 import { useTranslation } from 'react-i18next'
+
+const DEFAULT_SITE_ROOT = './data/www'
 import DockerRequired from '../components/DockerRequired.jsx'
 
 const statusColors = { running: 'green', stopped: 'gray', error: 'red', creating: 'orange' }
@@ -203,7 +205,7 @@ export default function PHPManager() {
     const handleCreateSite = () => {
         const url = phpAPI.createSiteStreamUrl()
         const body = { ...siteForm }
-        if (!body.root_path) body.root_path = `/var/www/${body.domain}`
+        if (!body.root_path) body.root_path = `${DEFAULT_SITE_ROOT}/${body.domain}`
         if (body.runtime_type === 'fpm' && body.runtime_id === 0) {
             const matching = runtimes.find(r => r.version === body.php_version && r.type === 'fpm')
             if (matching) body.runtime_id = matching.id
@@ -559,7 +561,7 @@ export default function PHPManager() {
                         </Box>
                         <Box>
                             <Text size="2" weight="bold" mb="1">{t('php.domain')}</Text>
-                            <TextField.Root value={siteForm.domain} onChange={e => setSiteForm(p => ({ ...p, domain: e.target.value, root_path: `/var/www/${e.target.value}` }))} placeholder="example.com" />
+                            <TextField.Root value={siteForm.domain} onChange={e => setSiteForm(p => ({ ...p, domain: e.target.value, root_path: `${DEFAULT_SITE_ROOT}/${e.target.value}` }))} placeholder="example.com" />
                         </Box>
                         <Box>
                             <Text size="2" weight="bold" mb="1">{t('php.runtime_type')}</Text>
@@ -607,7 +609,7 @@ export default function PHPManager() {
 
                         <Box>
                             <Text size="2" weight="bold" mb="1">{t('php.root_path')}</Text>
-                            <TextField.Root value={siteForm.root_path} onChange={e => setSiteForm(p => ({ ...p, root_path: e.target.value }))} placeholder="/var/www/example.com" />
+                            <TextField.Root value={siteForm.root_path} onChange={e => setSiteForm(p => ({ ...p, root_path: e.target.value }))} placeholder={`${DEFAULT_SITE_ROOT}/example.com`} />
                         </Box>
 
                         {siteForm.runtime_type === 'frankenphp' && (

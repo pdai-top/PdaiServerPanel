@@ -1,38 +1,32 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { Box, Flex, Text, Card, Badge, Heading, Button, Separator, Dialog, TextArea, TextField, Tabs, Callout, Tooltip, ScrollArea } from '@radix-ui/themes'
-import { Container, Play, Square, RefreshCw, Trash2, FileText, Plus, Download, Server, Search, Radio, Upload, X, Loader2, Star, Settings, Wand2, Info, Pencil, Terminal, Check, Copy, Zap } from 'lucide-react'
-import { useLocation, useNavigate } from 'react-router'
+import { Box, Flex, Text, Card, Badge, Heading, Button, Dialog, TextArea, TextField, Callout, Tooltip, ScrollArea } from '@radix-ui/themes'
+import { Container, Play, Square, RefreshCw, Trash2, FileText, Plus, Download, Search, X, Loader2, Star, Settings, Info, Pencil, Check, Copy, Zap, ChevronDown, ChevronRight } from 'lucide-react'
+import { useNavigate } from 'react-router'
 // composerize is lazy-loaded on button click (see convertDockerRun below) so
 // its transitive deps (composeverter, core-js, yargs-parser, deepmerge) do
 // not bloat the main bundle for users who never open the import flow.
-import { dockerAPI, wsAuthProtocols } from '../api/index.js'
+import { dockerAPI } from '../api/index.js'
 import { useTranslation } from 'react-i18next'
 import DockerRequired from '../components/DockerRequired.jsx'
 import { copyToClipboard } from '../utils/clipboard.js'
-// Docker — Compose Stacks management (simplified view)
-
-const statusColors = { running: 'green', stopped: 'gray', partial: 'orange', error: 'red', unknown: 'gray' }
+// Docker container management (simplified view)
 
 export default function DockerOverview() {
     const { t } = useTranslation()
     const navigate = useNavigate()
-    const location = useLocation()
     const containerSectionRef = useRef(null)
     const switchLogEndRef = useRef(null)
     const [dockerStatus, setDockerStatus] = useState(null)
     const [dockerChecking, setDockerChecking] = useState(true)
-    const [stacks, setStacks] = useState([])
     const [containers, setContainers] = useState([])
     const [info, setInfo] = useState(null)
     const [loading, setLoading] = useState(true)
     const [actionLoading, setActionLoading] = useState(null)
-    const [showCreate, setShowCreate] = useState(false)
     const [showRunContainer, setShowRunContainer] = useState(false)
     const [editingContainer, setEditingContainer] = useState(null)
     const [showLogs, setShowLogs] = useState(null)
     const [logs, setLogs] = useState('')
     const [logFilter, setLogFilter] = useState('')
-    const [logStreaming, setLogStreaming] = useState(false)
     const [switchDialogOpen, setSwitchDialogOpen] = useState(false)
     const [switchingPodman, setSwitchingPodman] = useState(false)
     const [switchDone, setSwitchDone] = useState(false)
@@ -40,7 +34,6 @@ export default function DockerOverview() {
     const [switchLogs, setSwitchLogs] = useState([])
     const [switchCopied, setSwitchCopied] = useState(false)
     const logRef = useRef(null)
-    const wsRef = useRef(null)
     // Tracks the most recent logs-fetch request so a stale "opened A then
     // opened B while A was in flight" sequence doesn't let A's response
     // clobber B's dialog contents (Group C correctness fix).
@@ -55,16 +48,14 @@ export default function DockerOverview() {
 
     const fetchData = useCallback(async () => {
         try {
-            const [stackRes, infoRes, containerRes] = await Promise.allSettled([
-                dockerAPI.listStacks(),
+            const [infoRes, containerRes] = await Promise.allSettled([
                 dockerAPI.info(),
                 dockerAPI.listContainers(true),
             ])
-            if (stackRes.status === 'fulfilled') setStacks(stackRes.value.data?.stacks || [])
             if (infoRes.status === 'fulfilled') setInfo(infoRes.value.data)
             if (containerRes.status === 'fulfilled') {
                 const all = containerRes.value.data?.containers || []
-                setContainers(all.filter(c => !c.labels?.['com.docker.compose.project']))
+                setContainers(all)
             }
         } catch { /* ignore */ } finally { setLoading(false) }
     }, [])
@@ -87,11 +78,6 @@ export default function DockerOverview() {
     }, [])
 
     useEffect(() => { checkDocker() }, [checkDocker])
-
-    useEffect(() => {
-        if (loading || location.hash !== '#containers') return
-        containerSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-    }, [loading, location.hash, containers.length])
 
     useEffect(() => {
         switchLogEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -162,17 +148,6 @@ export default function DockerOverview() {
         })
     }
 
-    const doAction = async (id, action) => {
-        setActionLoading(`${id}-${action}`)
-        setActionError(null)
-        try {
-            await dockerAPI[action](id)
-            await fetchData()
-        } catch (e) {
-            showActionError(e)
-        } finally { setActionLoading(null) }
-    }
-
     const doContainerAction = async (id, action) => {
         setActionLoading(`ctr-${id}-${action}`)
         setActionError(null)
@@ -189,7 +164,6 @@ export default function DockerOverview() {
         setShowLogs(`ctr-${name || id}`)
         setLogs('')
         setLogFilter('')
-        setLogStreaming(false)
         try {
             const res = await dockerAPI.containerLogs(id, '200')
             if (logReqRef.current !== reqId) return // a newer open superseded us
@@ -199,52 +173,10 @@ export default function DockerOverview() {
         }
     }
 
-    const viewLogs = async (id, streaming = false) => {
-        const reqId = ++logReqRef.current
-        setShowLogs(id)
-        setLogs('')
-        setLogFilter('')
-        setLogStreaming(streaming)
-
-        if (streaming) {
-            startLogStream(id)
-        } else {
-            try {
-                const res = await dockerAPI.stackLogs(id, '200')
-                if (logReqRef.current !== reqId) return
-                setLogs(res.data?.logs || t('docker.no_logs'))
-            } catch {
-                if (logReqRef.current === reqId) setLogs(t('docker.fetch_logs_failed'))
-            }
-        }
-    }
-
-    const startLogStream = (id) => {
-        if (wsRef.current) wsRef.current.close()
-        const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-        // Auth via Sec-WebSocket-Protocol (wsAuthProtocols helper); backend
-        // auth middleware reads "pdai.token.<jwt>" and echoes it so the
-        // 101 upgrade completes.
-        const ws = new WebSocket(
-            `${proto}//${window.location.host}/api/plugins/docker/stacks/${id}/logs/ws?tail=100`,
-            wsAuthProtocols(),
-        )
-        wsRef.current = ws
-        let buffer = ''
-        ws.onmessage = (e) => {
-            buffer += e.data + '\n'
-            setLogs(buffer)
-        }
-        ws.onerror = () => setLogs(prev => prev + '\n[WebSocket error]\n')
-        ws.onclose = () => setLogStreaming(false)
-    }
-
     const closeLogs = () => {
-        if (wsRef.current) { wsRef.current.close(); wsRef.current = null }
         setShowLogs(null)
         setLogs('')
         setLogFilter('')
-        setLogStreaming(false)
     }
 
     const downloadLogs = () => {
@@ -252,7 +184,7 @@ export default function DockerOverview() {
         const url = URL.createObjectURL(blob)
         const a = document.createElement('a')
         a.href = url
-        a.download = `stack-${showLogs}-logs.txt`
+        a.download = `container-${showLogs}-logs.txt`
         a.click()
         URL.revokeObjectURL(url)
     }
@@ -260,18 +192,6 @@ export default function DockerOverview() {
     useEffect(() => {
         if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight
     }, [logs])
-
-    // Close the live-log WebSocket on unmount. Without this, navigating away
-    // with the logs dialog open leaves the socket connected and keeps
-    // scheduling setState on a torn-down component (Group C robustness).
-    useEffect(() => {
-        return () => {
-            if (wsRef.current) {
-                wsRef.current.close()
-                wsRef.current = null
-            }
-        }
-    }, [])
 
     const filteredLogs = logFilter
         ? logs.split('\n').filter(line => line.toLowerCase().includes(logFilter.toLowerCase())).join('\n')
@@ -374,9 +294,8 @@ export default function DockerOverview() {
                     )}
                 </Flex>
                 <Flex gap="2">
+                    <Button size="2" variant="soft" onClick={() => setShowRunContainer(true)}><Plus size={16} /> {t('docker.create_container')}</Button>
                     <Button size="2" variant="soft" color="gray" onClick={() => navigate(`/docker/settings?runtime=${dockerStatus?.runtime || ''}`)}><Settings size={16} /> {t('docker.settings')}</Button>
-                    <Button size="2" variant="soft" onClick={() => setShowRunContainer(true)}><Play size={16} /> {t('docker.run_container')}</Button>
-                    <Button size="2" onClick={() => setShowCreate(true)}><Plus size={16} /> {t('docker.create_stack')}</Button>
                 </Flex>
             </Flex>
 
@@ -399,8 +318,6 @@ export default function DockerOverview() {
                     </Card>
                 </Flex>
             )}
-
-            <Separator size="4" mb="4" />
 
             <Dialog.Root open={switchDialogOpen} onOpenChange={(open) => { if (!open && !switchingPodman) setSwitchDialogOpen(false) }}>
                 <Dialog.Content maxWidth="640px" aria-describedby={undefined}>
@@ -455,139 +372,74 @@ export default function DockerOverview() {
                 </Dialog.Content>
             </Dialog.Root>
 
-            {/* Stacks */}
-            {stacks.length === 0 ? (
+            <Flex ref={containerSectionRef} align="center" gap="2" mb="3">
+                <Container size={18} />
+                <Heading size="4">{t('docker.container_list', '容器列表')}</Heading>
+                <Badge variant="soft" size="1">{containers.length}</Badge>
+            </Flex>
+            {containers.length === 0 ? (
                 <Card style={{ padding: 40, textAlign: 'center' }}>
-                    <Server size={48} style={{ margin: '0 auto 12px', opacity: 0.3 }} />
-                    <Text size="3" color="gray" style={{ display: 'block', marginBottom: 12 }}>{t('docker.no_stacks')}</Text>
-                    <Button onClick={() => setShowCreate(true)}><Plus size={16} /> {t('docker.create_stack')}</Button>
+                    <Text size="3" color="gray" style={{ display: 'block', marginBottom: 12 }}>{t('docker.no_containers', '暂无容器')}</Text>
+                    <Button onClick={() => setShowRunContainer(true)}><Plus size={16} /> {t('docker.create_container')}</Button>
                 </Card>
             ) : (
                 <Flex direction="column" gap="3">
-                    {stacks.map((s) => (
-                        <Card key={s.id} style={{ padding: 16 }}>
+                    {containers.map((c) => (
+                        <Card key={c.id} style={{ padding: 16 }}>
                             <Flex align="center" justify="between" wrap="wrap" gap="2">
                                 <Flex direction="column" gap="1" style={{ flex: 1, minWidth: 200 }}>
                                     <Flex align="center" gap="2">
-                                        <Text weight="bold" size="3">{s.name}</Text>
-                                        <Badge color={statusColors[s.status] || 'gray'} variant="soft" size="1">{s.status}</Badge>
-                                        {s.managed_by === 'appstore' && <Badge color="blue" variant="soft" size="1">{t('docker.managed_by_appstore')}</Badge>}
+                                        <Text weight="bold" size="3">{c.name || c.id}</Text>
+                                        <Badge color={c.state === 'running' ? 'green' : c.state === 'paused' ? 'orange' : 'gray'} variant="soft" size="1">{c.state}</Badge>
+                                        {c.image_status === 'outdated' && (
+                                            <Tooltip content={t('docker.image_outdated_hint')}>
+                                                <Badge color="amber" variant="soft" size="1">{t('docker.image_outdated')}</Badge>
+                                            </Tooltip>
+                                        )}
                                     </Flex>
-                                    {s.description && <Text size="2" color="gray">{s.description}</Text>}
+                                    <Flex gap="3">
+                                        <Text size="1" color="gray">{c.image}</Text>
+                                        {c.ports && c.ports.length > 0 && (
+                                            <Text size="1" color="gray">
+                                                {c.ports.filter(p => p.host_port).map(p => `${p.host_port}:${p.container_port}`).join(', ')}
+                                            </Text>
+                                        )}
+                                    </Flex>
+                                    <Text size="1" color="gray">{c.status}</Text>
                                 </Flex>
                                 <Flex gap="2" wrap="wrap">
-                                    {s.status !== 'running' && (
+                                    {c.state !== 'running' && (
                                         <Button size="1" variant="soft" color="green" disabled={!!actionLoading}
-                                            onClick={() => doAction(s.id, 'stackUp', 'Start')}>
+                                            onClick={() => doContainerAction(c.id, 'startContainer')}>
                                             <Play size={14} /> {t('docker.start')}
                                         </Button>
                                     )}
-                                    {s.status === 'running' && (
+                                    {c.state === 'running' && (
                                         <Button size="1" variant="soft" color="orange" disabled={!!actionLoading}
-                                            onClick={() => doAction(s.id, 'stackDown', 'Stop')}>
+                                            onClick={() => doContainerAction(c.id, 'stopContainer')}>
                                             <Square size={14} /> {t('docker.stop')}
                                         </Button>
                                     )}
                                     <Button size="1" variant="soft" disabled={!!actionLoading}
-                                        onClick={() => doAction(s.id, 'stackRestart', 'Restart')}>
+                                        onClick={() => doContainerAction(c.id, 'restartContainer')}>
                                         <RefreshCw size={14} /> {t('docker.restart')}
                                     </Button>
-                                    <Button size="1" variant="soft" disabled={!!actionLoading}
-                                        onClick={() => doAction(s.id, 'stackPull', 'Pull')}>
-                                        <Download size={14} /> {t('docker.pull')}
+                                    <Button size="1" variant="soft" disabled={!!actionLoading} onClick={() => setEditingContainer(c)}>
+                                        <Pencil size={14} /> {t('common.edit')}
                                     </Button>
-                                    <Button size="1" variant="soft" onClick={() => viewLogs(s.id)}>
+                                    <Button size="1" variant="soft" onClick={() => viewContainerLogs(c.id, c.name)}>
                                         <FileText size={14} /> {t('docker.logs')}
                                     </Button>
-                                    {s.status === 'running' && (
-                                        <Button size="1" variant="soft" color="green" onClick={() => viewLogs(s.id, true)}>
-                                            <Radio size={14} /> {t('docker.live')}
-                                        </Button>
-                                    )}
-                                    {!s.managed_by && (
-                                        <Button size="1" variant="soft" color="red" disabled={!!actionLoading}
-                                            onClick={() => { if (confirm(t('docker.confirm_delete'))) doAction(s.id, 'deleteStack', 'Delete') }}>
-                                            <Trash2 size={14} />
-                                        </Button>
-                                    )}
+                                    <Button size="1" variant="soft" color="red" disabled={!!actionLoading}
+                                        onClick={() => { if (confirm(t('docker.confirm_remove_container'))) doContainerAction(c.id, 'removeContainer') }}>
+                                        <Trash2 size={14} />
+                                    </Button>
                                 </Flex>
                             </Flex>
                         </Card>
                     ))}
                 </Flex>
             )}
-
-            {/* Standalone Containers */}
-            {containers.length > 0 && (
-                <>
-                    <Separator size="4" my="4" />
-                    <Flex ref={containerSectionRef} align="center" gap="2" mb="3">
-                        <Container size={18} />
-                        <Heading size="4">{t('docker.standalone_containers')}</Heading>
-                        <Badge variant="soft" size="1">{containers.length}</Badge>
-                    </Flex>
-                    <Flex direction="column" gap="3">
-                        {containers.map((c) => (
-                            <Card key={c.id} style={{ padding: 16 }}>
-                                <Flex align="center" justify="between" wrap="wrap" gap="2">
-                                    <Flex direction="column" gap="1" style={{ flex: 1, minWidth: 200 }}>
-                                        <Flex align="center" gap="2">
-                                            <Text weight="bold" size="3">{c.name || c.id}</Text>
-                                            <Badge color={c.state === 'running' ? 'green' : c.state === 'paused' ? 'orange' : 'gray'} variant="soft" size="1">{c.state}</Badge>
-                                            {c.image_status === 'outdated' && (
-                                                <Tooltip content={t('docker.image_outdated_hint')}>
-                                                    <Badge color="amber" variant="soft" size="1">{t('docker.image_outdated')}</Badge>
-                                                </Tooltip>
-                                            )}
-                                        </Flex>
-                                        <Flex gap="3">
-                                            <Text size="1" color="gray">{c.image}</Text>
-                                            {c.ports && c.ports.length > 0 && (
-                                                <Text size="1" color="gray">
-                                                    {c.ports.filter(p => p.host_port).map(p => `${p.host_port}:${p.container_port}`).join(', ')}
-                                                </Text>
-                                            )}
-                                        </Flex>
-                                        <Text size="1" color="gray">{c.status}</Text>
-                                    </Flex>
-                                    <Flex gap="2" wrap="wrap">
-                                        {c.state !== 'running' && (
-                                            <Button size="1" variant="soft" color="green" disabled={!!actionLoading}
-                                                onClick={() => doContainerAction(c.id, 'startContainer')}>
-                                                <Play size={14} /> {t('docker.start')}
-                                            </Button>
-                                        )}
-                                        {c.state === 'running' && (
-                                            <Button size="1" variant="soft" color="orange" disabled={!!actionLoading}
-                                                onClick={() => doContainerAction(c.id, 'stopContainer')}>
-                                                <Square size={14} /> {t('docker.stop')}
-                                            </Button>
-                                        )}
-                                        <Button size="1" variant="soft" disabled={!!actionLoading}
-                                            onClick={() => doContainerAction(c.id, 'restartContainer')}>
-                                            <RefreshCw size={14} /> {t('docker.restart')}
-                                        </Button>
-                                        <Button size="1" variant="soft" disabled={!!actionLoading} onClick={() => setEditingContainer(c)}>
-                                            <Pencil size={14} /> {t('common.edit')}
-                                        </Button>
-                                        <Button size="1" variant="soft" onClick={() => viewContainerLogs(c.id, c.name)}>
-                                            <FileText size={14} /> {t('docker.logs')}
-                                        </Button>
-                                        <Button size="1" variant="soft" color="red" disabled={!!actionLoading}
-                                            onClick={() => { if (confirm(t('docker.confirm_remove_container'))) doContainerAction(c.id, 'removeContainer') }}>
-                                            <Trash2 size={14} />
-                                        </Button>
-                                    </Flex>
-                                </Flex>
-                            </Card>
-                        ))}
-                    </Flex>
-                </>
-            )}
-
-            {/* Create Stack Dialog */}
-            <CreateStackDialog open={showCreate} onClose={() => setShowCreate(false)} onCreated={fetchData} />
-
             {/* Run Container Dialog */}
             <RunContainerDialog open={showRunContainer} onClose={() => setShowRunContainer(false)} onCreated={fetchData} />
             <RunContainerDialog
@@ -604,16 +456,10 @@ export default function DockerOverview() {
                     <Dialog.Title>
                         <Flex justify="between" align="center">
                             <Flex align="center" gap="2">
-                                {t('docker.stack_logs')}
-                                {logStreaming && <Badge color="green" variant="soft"><Radio size={10} /> Live</Badge>}
+                                {t('docker.container_logs', '容器日志')}
                             </Flex>
                             <Flex gap="2">
                                 <Button variant="ghost" size="1" onClick={downloadLogs}><Download size={14} /></Button>
-                                {!logStreaming && showLogs && (
-                                    <Button variant="ghost" size="1" color="green" onClick={() => viewLogs(showLogs, true)}>
-                                        <Radio size={14} />
-                                    </Button>
-                                )}
                             </Flex>
                         </Flex>
                     </Dialog.Title>
@@ -632,411 +478,6 @@ export default function DockerOverview() {
     )
 }
 
-function CreateStackDialog({ open, onClose, onCreated }) {
-    const { t } = useTranslation()
-    const [name, setName] = useState('')
-    const [description, setDescription] = useState('')
-    const [composeFile, setComposeFile] = useState('')
-    const [envFile, setEnvFile] = useState('')
-    const [autoStart, setAutoStart] = useState(true)
-    const [creating, setCreating] = useState(false)
-    const [activeTab, setActiveTab] = useState('ui')
-    const [dockerRunCmd, setDockerRunCmd] = useState('')
-    const [convertError, setConvertError] = useState(false) // boolean: friendly message shown regardless
-    const [converting, setConverting] = useState(false)
-    const [createError, setCreateError] = useState('')
-    const [uiImage, setUiImage] = useState('')
-    const [uiServiceName, setUiServiceName] = useState('app')
-    const [uiPorts, setUiPorts] = useState([])
-    const [uiVolumes, setUiVolumes] = useState([])
-    const [uiEnvVars, setUiEnvVars] = useState([])
-    const [uiRestartPolicy, setUiRestartPolicy] = useState('unless-stopped')
-    const [uiNetwork, setUiNetwork] = useState('')
-    const [uiCommand, setUiCommand] = useState('')
-    const [uiMemoryLimit, setUiMemoryLimit] = useState('')
-    const [uiCpuLimit, setUiCpuLimit] = useState('')
-    const composeInputRef = useRef(null)
-    const envInputRef = useRef(null)
-
-    const resetUIForm = () => {
-        setUiImage('')
-        setUiServiceName('app')
-        setUiPorts([])
-        setUiVolumes([])
-        setUiEnvVars([])
-        setUiRestartPolicy('unless-stopped')
-        setUiNetwork('')
-        setUiCommand('')
-        setUiMemoryLimit('')
-        setUiCpuLimit('')
-    }
-
-    // Reset transient dialog state whenever the dialog closes so a user who
-    // cancels a failed conversion does not reopen to a stale docker-run tab
-    // with the failing command and a red error banner still visible.
-    useEffect(() => {
-        if (!open) {
-            setActiveTab('ui')
-            setDockerRunCmd('')
-            setConvertError(false)
-            setConverting(false)
-            setCreateError('')
-            resetUIForm()
-        }
-    }, [open])
-
-    // Track whether the dialog is still open when an async conversion
-    // completes. Without this, a user who closes the dialog during the
-    // first click (while composerize is lazy-loading) would have the
-    // reset-on-close effect fire, then the deferred setComposeFile /
-    // setActiveTab / setConvertError calls from the still-running
-    // promise would reintroduce stale state on next open.
-    const openRef = useRef(open)
-    useEffect(() => { openRef.current = open }, [open])
-
-    const addUIPort = () => setUiPorts([...uiPorts, { host_port: '', container_port: '', protocol: 'tcp' }])
-    const removeUIPort = (i) => setUiPorts(uiPorts.filter((_, idx) => idx !== i))
-    const updateUIPort = (i, field, val) => {
-        const next = [...uiPorts]
-        next[i] = { ...next[i], [field]: val }
-        setUiPorts(next)
-    }
-
-    const addUIVolume = () => setUiVolumes([...uiVolumes, { host_path: '', container_path: '', read_only: false }])
-    const removeUIVolume = (i) => setUiVolumes(uiVolumes.filter((_, idx) => idx !== i))
-    const updateUIVolume = (i, field, val) => {
-        const next = [...uiVolumes]
-        next[i] = { ...next[i], [field]: val }
-        setUiVolumes(next)
-    }
-
-    const addUIEnv = () => setUiEnvVars([...uiEnvVars, { key: '', value: '' }])
-    const removeUIEnv = (i) => setUiEnvVars(uiEnvVars.filter((_, idx) => idx !== i))
-    const updateUIEnv = (i, field, val) => {
-        const next = [...uiEnvVars]
-        next[i] = { ...next[i], [field]: val }
-        setUiEnvVars(next)
-    }
-
-    const yamlQuote = (value) => JSON.stringify(String(value ?? ''))
-
-    const buildComposeFromUI = () => {
-        const serviceName = (uiServiceName || name || 'app').trim().replace(/[^a-zA-Z0-9_.-]/g, '-') || 'app'
-        const lines = [
-            "version: '3.8'",
-            'services:',
-            `  ${serviceName}:`,
-            `    image: ${uiImage.trim()}`,
-        ]
-        if (uiRestartPolicy && uiRestartPolicy !== 'no') lines.push(`    restart: ${uiRestartPolicy}`)
-
-        const ports = uiPorts.filter(p => p.container_port)
-        if (ports.length) {
-            lines.push('    ports:')
-            ports.forEach((p) => {
-                const mapping = p.host_port ? `${p.host_port}:${p.container_port}` : p.container_port
-                lines.push(`      - ${yamlQuote(`${mapping}${p.protocol === 'udp' ? '/udp' : ''}`)}`)
-            })
-        }
-
-        const volumes = uiVolumes.filter(v => v.host_path && v.container_path)
-        if (volumes.length) {
-            lines.push('    volumes:')
-            volumes.forEach((v) => {
-                lines.push(`      - ${yamlQuote(`${v.host_path}:${v.container_path}${v.read_only ? ':ro' : ''}`)}`)
-            })
-        }
-
-        const envVars = uiEnvVars.filter(e => e.key)
-        if (envVars.length) {
-            lines.push('    environment:')
-            envVars.forEach((e) => lines.push(`      ${e.key}: ${yamlQuote(e.value || '')}`))
-        }
-
-        if (uiNetwork.trim()) lines.push(`    network_mode: ${yamlQuote(uiNetwork.trim())}`)
-        if (uiCommand.trim()) lines.push(`    command: ${yamlQuote(uiCommand.trim())}`)
-        if (uiMemoryLimit) lines.push(`    mem_limit: ${uiMemoryLimit}m`)
-        if (uiCpuLimit) lines.push(`    cpus: ${yamlQuote(uiCpuLimit)}`)
-        return lines.join('\n')
-    }
-
-    // Dynamically import composerize on first click to keep the main bundle
-    // small for users who never touch this feature. Raw parser errors are
-    // logged to the browser console for developer triage; the UI shows an
-    // i18n-friendly message regardless of the underlying failure mode.
-    const convertDockerRun = async () => {
-        if (!dockerRunCmd.trim() || converting) return
-        setConverting(true)
-        setConvertError(false)
-        try {
-            const { dockerRunToCompose } = await import('../utils/composerize.js')
-            const cleaned = dockerRunToCompose(dockerRunCmd)
-            if (!openRef.current) return // dialog closed while loading ? drop result
-            setComposeFile(cleaned)
-            setActiveTab('compose')
-        } catch (e) {
-            console.error('composerize conversion failed:', e)
-            if (openRef.current) setConvertError(true)
-        } finally {
-            if (openRef.current) setConverting(false)
-        }
-    }
-
-    const currentComposeFile = activeTab === 'ui' ? buildComposeFromUI() : composeFile
-    const canCreate = name.trim() && (activeTab === 'ui' ? uiImage.trim() : composeFile.trim())
-
-    const handleCreate = async () => {
-        const nextComposeFile = activeTab === 'ui' ? buildComposeFromUI() : composeFile
-        if (!name.trim() || !nextComposeFile.trim()) return
-        setCreating(true)
-        setCreateError('')
-        try {
-            await dockerAPI.createStack({
-                name: name.trim(),
-                description,
-                compose_file: nextComposeFile,
-                env_file: envFile,
-                auto_start: autoStart,
-            })
-            onCreated()
-            onClose()
-            setName(''); setDescription(''); setComposeFile(''); setEnvFile('')
-            setDockerRunCmd(''); setConvertError(false); setActiveTab('ui'); resetUIForm()
-        } catch (e) {
-            setCreateError(e.response?.data?.error || e.message)
-        } finally { setCreating(false) }
-    }
-
-    const handleFileUpload = (setter) => (e) => {
-        const file = e.target.files?.[0]
-        if (!file) return
-        const reader = new FileReader()
-        reader.onload = (ev) => setter(ev.target.result)
-        reader.readAsText(file)
-        e.target.value = '' // reset so same file can be re-uploaded
-    }
-
-    return (
-        <Dialog.Root open={open} onOpenChange={(v) => { if (!v) onClose() }}>
-            <Dialog.Content maxWidth="760px" style={{ maxHeight: '85vh', overflow: 'auto' }}>
-                <Dialog.Title>{t('docker.create_stack')}</Dialog.Title>
-                <Flex direction="column" gap="3" mt="3">
-                    <Box>
-                        <Text size="2" weight="bold" mb="1" style={{ display: 'block' }}>{t('docker.stack_name')}</Text>
-                        <TextField.Root placeholder="my-app" value={name} onChange={(e) => setName(e.target.value)} />
-                    </Box>
-                    <Box>
-                        <Text size="2" weight="bold" mb="1" style={{ display: 'block' }}>{t('docker.description')}</Text>
-                        <TextField.Root placeholder={t('docker.description_placeholder')} value={description} onChange={(e) => setDescription(e.target.value)} />
-                    </Box>
-
-                    <Box>
-                        <Text size="2" weight="bold" mb="2" style={{ display: 'block' }}>{t('docker.create_mode')}</Text>
-                        <Tabs.Root value={activeTab} onValueChange={setActiveTab}>
-                            <Tabs.List>
-                                <Tabs.Trigger value="ui">{t('docker.ui_create')}</Tabs.Trigger>
-                                <Tabs.Trigger value="compose">{t('docker.compose_file')}</Tabs.Trigger>
-                                <Tabs.Trigger value="env">.env</Tabs.Trigger>
-                                <Tabs.Trigger value="docker-run">{t('docker.import_docker_run')}</Tabs.Trigger>
-                            </Tabs.List>
-                            <Box pt="3">
-                                <Tabs.Content value="ui">
-                                    <Flex direction="column" gap="3">
-                                        <Callout.Root color="blue" size="1">
-                                            <Callout.Icon><Info size={14} /></Callout.Icon>
-                                            <Callout.Text>{t('docker.ui_create_hint')}</Callout.Text>
-                                        </Callout.Root>
-
-                                        <Box>
-                                            <Text size="2" weight="bold" mb="1" style={{ display: 'block' }}>{t('docker.image')} *</Text>
-                                            <TextField.Root placeholder="nginx:latest" value={uiImage} onChange={(e) => setUiImage(e.target.value)} />
-                                        </Box>
-
-                                        <Box>
-                                            <Text size="2" weight="bold" mb="1" style={{ display: 'block' }}>{t('docker.service_name')}</Text>
-                                            <TextField.Root placeholder="app" value={uiServiceName} onChange={(e) => setUiServiceName(e.target.value)} />
-                                        </Box>
-
-                                        <Box>
-                                            <Flex align="center" justify="between" mb="1">
-                                                <Text size="2" weight="bold">{t('docker.port_mappings')}</Text>
-                                                <Button variant="ghost" size="1" onClick={addUIPort}><Plus size={14} /> {t('docker.add_port')}</Button>
-                                            </Flex>
-                                            {uiPorts.map((p, i) => (
-                                                <Flex key={i} gap="2" align="center" mb="1">
-                                                    <TextField.Root placeholder={t('docker.host_port')} value={p.host_port}
-                                                        onChange={(e) => updateUIPort(i, 'host_port', e.target.value)} style={{ width: 110 }} />
-                                                    <Text size="2">:</Text>
-                                                    <TextField.Root placeholder={t('docker.container_port')} value={p.container_port}
-                                                        onChange={(e) => updateUIPort(i, 'container_port', e.target.value)} style={{ width: 130 }} />
-                                                    <select value={p.protocol} onChange={(e) => updateUIPort(i, 'protocol', e.target.value)}
-                                                        style={{ padding: '6px 8px', borderRadius: 6, border: '1px solid var(--gray-6)', fontSize: 13, background: 'var(--color-background)' }}>
-                                                        <option value="tcp">TCP</option>
-                                                        <option value="udp">UDP</option>
-                                                    </select>
-                                                    <Button variant="ghost" size="1" color="red" onClick={() => removeUIPort(i)}><X size={14} /></Button>
-                                                </Flex>
-                                            ))}
-                                        </Box>
-
-                                        <Box>
-                                            <Flex align="center" justify="between" mb="1">
-                                                <Text size="2" weight="bold">{t('docker.volume_mounts')}</Text>
-                                                <Button variant="ghost" size="1" onClick={addUIVolume}><Plus size={14} /> {t('docker.add_volume')}</Button>
-                                            </Flex>
-                                            {uiVolumes.map((v, i) => (
-                                                <Flex key={i} gap="2" align="center" mb="1">
-                                                    <TextField.Root placeholder={t('docker.host_path')} value={v.host_path}
-                                                        onChange={(e) => updateUIVolume(i, 'host_path', e.target.value)} style={{ flex: 1 }} />
-                                                    <Text size="2">:</Text>
-                                                    <TextField.Root placeholder={t('docker.container_path')} value={v.container_path}
-                                                        onChange={(e) => updateUIVolume(i, 'container_path', e.target.value)} style={{ flex: 1 }} />
-                                                    <Flex align="center" gap="1">
-                                                        <input type="checkbox" checked={v.read_only}
-                                                            onChange={(e) => updateUIVolume(i, 'read_only', e.target.checked)} />
-                                                        <Text size="1">RO</Text>
-                                                    </Flex>
-                                                    <Button variant="ghost" size="1" color="red" onClick={() => removeUIVolume(i)}><X size={14} /></Button>
-                                                </Flex>
-                                            ))}
-                                        </Box>
-
-                                        <Box>
-                                            <Flex align="center" justify="between" mb="1">
-                                                <Text size="2" weight="bold">{t('docker.env_vars')}</Text>
-                                                <Button variant="ghost" size="1" onClick={addUIEnv}><Plus size={14} /> {t('docker.add_env')}</Button>
-                                            </Flex>
-                                            {uiEnvVars.map((e, i) => (
-                                                <Flex key={i} gap="2" align="center" mb="1">
-                                                    <TextField.Root placeholder="KEY" value={e.key}
-                                                        onChange={(ev) => updateUIEnv(i, 'key', ev.target.value)} style={{ flex: 1 }} />
-                                                    <Text size="2">=</Text>
-                                                    <TextField.Root placeholder="VALUE" value={e.value}
-                                                        onChange={(ev) => updateUIEnv(i, 'value', ev.target.value)} style={{ flex: 1 }} />
-                                                    <Button variant="ghost" size="1" color="red" onClick={() => removeUIEnv(i)}><X size={14} /></Button>
-                                                </Flex>
-                                            ))}
-                                        </Box>
-
-                                        <Flex gap="3">
-                                            <Box style={{ flex: 1 }}>
-                                                <Text size="2" weight="bold" mb="1" style={{ display: 'block' }}>{t('docker.network')}</Text>
-                                                <TextField.Root placeholder={t('docker.network_default')} value={uiNetwork} onChange={(e) => setUiNetwork(e.target.value)} />
-                                            </Box>
-                                            <Box style={{ flex: 1 }}>
-                                                <Text size="2" weight="bold" mb="1" style={{ display: 'block' }}>{t('docker.restart_policy')}</Text>
-                                                <select value={uiRestartPolicy} onChange={(e) => setUiRestartPolicy(e.target.value)}
-                                                    style={{ width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid var(--gray-6)', fontSize: 13, background: 'var(--color-background)' }}>
-                                                    <option value="no">{t('docker.restart_no')}</option>
-                                                    <option value="always">{t('docker.restart_always')}</option>
-                                                    <option value="unless-stopped">{t('docker.restart_unless_stopped')}</option>
-                                                    <option value="on-failure">{t('docker.restart_on_failure')}</option>
-                                                </select>
-                                            </Box>
-                                        </Flex>
-
-                                        <Box>
-                                            <Text size="2" weight="bold" mb="1" style={{ display: 'block' }}>{t('docker.command')}</Text>
-                                            <TextField.Root placeholder={t('docker.command_placeholder')} value={uiCommand} onChange={(e) => setUiCommand(e.target.value)} />
-                                        </Box>
-
-                                        <Flex gap="3">
-                                            <Box style={{ flex: 1 }}>
-                                                <Text size="2" weight="bold" mb="1" style={{ display: 'block' }}>{t('docker.memory_limit')}</Text>
-                                                <TextField.Root type="number" placeholder="0" value={uiMemoryLimit} onChange={(e) => setUiMemoryLimit(e.target.value)} />
-                                            </Box>
-                                            <Box style={{ flex: 1 }}>
-                                                <Text size="2" weight="bold" mb="1" style={{ display: 'block' }}>{t('docker.cpu_limit')}</Text>
-                                                <TextField.Root type="number" placeholder="0" step="0.1" value={uiCpuLimit} onChange={(e) => setUiCpuLimit(e.target.value)} />
-                                            </Box>
-                                        </Flex>
-
-                                        {uiImage.trim() && (
-                                            <Box>
-                                                <Text size="2" weight="bold" mb="1" style={{ display: 'block' }}>{t('docker.compose_preview')}</Text>
-                                                <TextArea readOnly value={currentComposeFile} style={{ minHeight: 160, fontFamily: 'monospace', fontSize: '0.8rem' }} />
-                                            </Box>
-                                        )}
-                                    </Flex>
-                                </Tabs.Content>
-                                <Tabs.Content value="compose">
-                                    <Flex justify="end" mb="1">
-                                        <input ref={composeInputRef} type="file" accept=".yml,.yaml" hidden onChange={handleFileUpload(setComposeFile)} />
-                                        <Button variant="ghost" size="1" onClick={() => composeInputRef.current?.click()}>
-                                            <Upload size={14} /> {t('docker.upload_file')}
-                                        </Button>
-                                    </Flex>
-                                    <TextArea
-                                        placeholder={`version: '3.8'\nservices:\n  app:\n    image: nginx:latest\n    ports:\n      - "8080:80"`}
-                                        value={composeFile}
-                                        onChange={(e) => setComposeFile(e.target.value)}
-                                        style={{ minHeight: 250, fontFamily: 'monospace', fontSize: '0.85rem' }}
-                                    />
-                                </Tabs.Content>
-                                <Tabs.Content value="env">
-                                    <Flex justify="end" mb="1">
-                                        <input ref={envInputRef} type="file" accept=".env" hidden onChange={handleFileUpload(setEnvFile)} />
-                                        <Button variant="ghost" size="1" onClick={() => envInputRef.current?.click()}>
-                                            <Upload size={14} /> {t('docker.upload_file')}
-                                        </Button>
-                                    </Flex>
-                                    <TextArea
-                                        placeholder="DB_HOST=localhost\nDB_PORT=5432"
-                                        value={envFile}
-                                        onChange={(e) => setEnvFile(e.target.value)}
-                                        style={{ minHeight: 200, fontFamily: 'monospace', fontSize: '0.85rem' }}
-                                    />
-                                </Tabs.Content>
-                                <Tabs.Content value="docker-run">
-                                    <Callout.Root color="blue" size="1" mb="2">
-                                        <Callout.Icon><Info size={14} /></Callout.Icon>
-                                        <Callout.Text>{t('docker.import_docker_run_hint')}</Callout.Text>
-                                    </Callout.Root>
-                                    <TextArea
-                                        placeholder={`docker run -d -p 8080:80 -e FOO=bar -v /data:/data nginx:latest`}
-                                        value={dockerRunCmd}
-                                        onChange={(e) => { setDockerRunCmd(e.target.value); if (convertError) setConvertError(false) }}
-                                        style={{ minHeight: 140, fontFamily: 'monospace', fontSize: '0.85rem' }}
-                                    />
-                                    {convertError && (
-                                        <Callout.Root color="red" size="1" mt="2">
-                                            <Callout.Icon><X size={14} /></Callout.Icon>
-                                            <Callout.Text>{t('docker.import_docker_run_failed')}</Callout.Text>
-                                        </Callout.Root>
-                                    )}
-                                    <Flex justify="end" mt="2">
-                                        <Button size="2" disabled={!dockerRunCmd.trim() || converting} onClick={convertDockerRun}>
-                                            {converting ? <Loader2 size={14} className="spin" /> : <Wand2 size={14} />}
-                                            {' '}{t('docker.convert_to_compose')}
-                                        </Button>
-                                    </Flex>
-                                </Tabs.Content>
-                            </Box>
-                        </Tabs.Root>
-                    </Box>
-
-                    <Flex align="center" gap="2">
-                        <input type="checkbox" id="auto-start" checked={autoStart} onChange={(e) => setAutoStart(e.target.checked)} />
-                        <label htmlFor="auto-start"><Text size="2">{t('docker.auto_start')}</Text></label>
-                    </Flex>
-                </Flex>
-                {createError && (
-                    <Callout.Root color="red" size="1" mt="3">
-                        <Callout.Icon><X size={14} /></Callout.Icon>
-                        <Callout.Text>{createError}</Callout.Text>
-                    </Callout.Root>
-                )}
-                <Flex justify="end" gap="2" mt="4">
-                    <Dialog.Close><Button variant="soft" color="gray">{t('common.cancel')}</Button></Dialog.Close>
-                    <Button disabled={creating || !canCreate} onClick={handleCreate}>
-                        {creating ? t('common.saving') : t('common.create')}
-                    </Button>
-                </Flex>
-            </Dialog.Content>
-        </Dialog.Root>
-    )
-}
-
 function RunContainerDialog({ open, onClose, onCreated, container }) {
     const { t } = useTranslation()
     const isEdit = !!container
@@ -1046,7 +487,7 @@ function RunContainerDialog({ open, onClose, onCreated, container }) {
     const [volumes, setVolumes] = useState([])
     const [envVars, setEnvVars] = useState([])
     const [network, setNetwork] = useState('')
-    const [restartPolicy, setRestartPolicy] = useState('no')
+    const [restartPolicy, setRestartPolicy] = useState('unless-stopped')
     const [command, setCommand] = useState('')
     const [memoryLimit, setMemoryLimit] = useState('')
     const [cpuLimit, setCpuLimit] = useState('')
@@ -1054,9 +495,9 @@ function RunContainerDialog({ open, onClose, onCreated, container }) {
     const [creating, setCreating] = useState(false)
     const [loadingDetail, setLoadingDetail] = useState(false)
     const [error, setError] = useState('')
+    const [advancedOpen, setAdvancedOpen] = useState(false)
 
     // Image search state
-    const [searchTerm, setSearchTerm] = useState('')
     const [searchResults, setSearchResults] = useState([])
     const [searching, setSearching] = useState(false)
     const [showSearch, setShowSearch] = useState(false)
@@ -1100,9 +541,10 @@ function RunContainerDialog({ open, onClose, onCreated, container }) {
 
     const resetForm = () => {
         setImage(''); setName(''); setPorts([]); setVolumes([]); setEnvVars([])
-        setNetwork(''); setRestartPolicy('no'); setCommand('')
+        setNetwork(''); setRestartPolicy('unless-stopped'); setCommand('')
         setMemoryLimit(''); setCpuLimit(''); setError('')
-        setSearchTerm(''); setSearchResults([]); setShowSearch(false)
+        setSearchResults([]); setShowSearch(false)
+        setAdvancedOpen(false)
     }
 
     const handleClose = () => {
@@ -1111,10 +553,11 @@ function RunContainerDialog({ open, onClose, onCreated, container }) {
     }
 
     const handleSearch = async () => {
-        if (!searchTerm.trim()) return
+        const q = image.trim()
+        if (!q) return
         setSearching(true)
         try {
-            const res = await dockerAPI.searchImages(searchTerm.trim(), 10)
+            const res = await dockerAPI.searchImages(q, 10)
             setSearchResults(res.data?.results || [])
             setShowSearch(true)
         } catch { setSearchResults([]) }
@@ -1183,7 +626,7 @@ function RunContainerDialog({ open, onClose, onCreated, container }) {
     return (
         <Dialog.Root open={open} onOpenChange={(v) => { if (!v) handleClose() }}>
             <Dialog.Content maxWidth="700px" style={{ maxHeight: '85vh', overflow: 'auto' }}>
-                <Dialog.Title>{isEdit ? t('docker.edit_container') : t('docker.run_container')}</Dialog.Title>
+                <Dialog.Title>{isEdit ? t('docker.edit_container') : t('docker.create_container')}</Dialog.Title>
                 <Flex direction="column" gap="3" mt="3">
                     {isEdit && (
                         <Callout.Root color="amber" size="1">
@@ -1191,27 +634,28 @@ function RunContainerDialog({ open, onClose, onCreated, container }) {
                             <Callout.Text>{t('docker.recreate_container_hint')}</Callout.Text>
                         </Callout.Root>
                     )}
-                    {/* Image */}
-                    <Box>
-                        <Text size="2" weight="bold" mb="1" style={{ display: 'block' }}>{t('docker.image')} *</Text>
-                        <Flex gap="2">
-                            <Box style={{ flex: 1 }}>
-                                <TextField.Root placeholder="nginx:latest" value={image} onChange={(e) => setImage(e.target.value)} />
-                            </Box>
+                    <Flex gap="3" align="start" wrap="wrap">
+                        <Box style={{ flex: '0 1 220px' }}>
+                            <Text size="2" weight="bold" mb="1" style={{ display: 'block' }}>{t('docker.container_name')}</Text>
+                            <TextField.Root placeholder={t('docker.container_name_placeholder')} value={name} onChange={(e) => setName(e.target.value)} />
+                        </Box>
+                        <Box style={{ flex: '1 1 320px', minWidth: 260 }}>
+                            <Text size="2" weight="bold" mb="1" style={{ display: 'block' }}>{t('docker.image')} *</Text>
                             <TextField.Root
-                                placeholder={t('docker.search_placeholder')}
-                                value={searchTerm}
-                                onChange={(e) => setSearchTerm(e.target.value)}
+                                placeholder="nginx:latest"
+                                value={image}
+                                onChange={(e) => setImage(e.target.value)}
                                 onKeyDown={(e) => { if (e.key === 'Enter') handleSearch() }}
-                                style={{ width: 180 }}
                             >
                                 <TextField.Slot side="right">
-                                    <Button variant="ghost" size="1" onClick={handleSearch} disabled={searching}>
+                                    <Button variant="ghost" size="1" onClick={handleSearch} disabled={searching || !image.trim()} aria-label={t('docker.search_hub')}>
                                         {searching ? <Loader2 size={14} className="spin" /> : <Search size={14} />}
                                     </Button>
                                 </TextField.Slot>
                             </TextField.Root>
-                        </Flex>
+                        </Box>
+                    </Flex>
+                    <Box>
                         {showSearch && searchResults.length > 0 && (
                             <Box mt="2" style={{ border: '1px solid var(--gray-5)', borderRadius: 8, maxHeight: 200, overflow: 'auto' }}>
                                 {searchResults.map((r, i) => (
@@ -1237,36 +681,6 @@ function RunContainerDialog({ open, onClose, onCreated, container }) {
                         )}
                     </Box>
 
-                    {/* Container Name */}
-                    <Box>
-                        <Text size="2" weight="bold" mb="1" style={{ display: 'block' }}>{t('docker.container_name')}</Text>
-                        <TextField.Root placeholder={t('docker.container_name_placeholder')} value={name} onChange={(e) => setName(e.target.value)} />
-                    </Box>
-
-                    {/* Port Mappings */}
-                    <Box>
-                        <Flex align="center" justify="between" mb="1">
-                            <Text size="2" weight="bold">{t('docker.port_mappings')}</Text>
-                            <Button variant="ghost" size="1" onClick={addPort}><Plus size={14} /> {t('docker.add_port')}</Button>
-                        </Flex>
-                        {ports.map((p, i) => (
-                            <Flex key={i} gap="2" align="center" mb="1">
-                                <TextField.Root placeholder={t('docker.host_port')} value={p.host_port}
-                                    onChange={(e) => updatePort(i, 'host_port', e.target.value)} style={{ width: 100 }} />
-                                <Text size="2">:</Text>
-                                <TextField.Root placeholder={t('docker.container_port')} value={p.container_port}
-                                    onChange={(e) => updatePort(i, 'container_port', e.target.value)} style={{ width: 100 }} />
-                                <select value={p.protocol} onChange={(e) => updatePort(i, 'protocol', e.target.value)}
-                                    style={{ padding: '6px 8px', borderRadius: 6, border: '1px solid var(--gray-6)', fontSize: 13, background: 'var(--color-background)' }}>
-                                    <option value="tcp">TCP</option>
-                                    <option value="udp">UDP</option>
-                                </select>
-                                <Button variant="ghost" size="1" color="red" onClick={() => removePort(i)}><X size={14} /></Button>
-                            </Flex>
-                        ))}
-                    </Box>
-
-                    {/* Volume Mounts */}
                     <Box>
                         <Flex align="center" justify="between" mb="1">
                             <Text size="2" weight="bold">{t('docker.volume_mounts')}</Text>
@@ -1289,7 +703,6 @@ function RunContainerDialog({ open, onClose, onCreated, container }) {
                         ))}
                     </Box>
 
-                    {/* Environment Variables */}
                     <Box>
                         <Flex align="center" justify="between" mb="1">
                             <Text size="2" weight="bold">{t('docker.env_vars')}</Text>
@@ -1307,47 +720,70 @@ function RunContainerDialog({ open, onClose, onCreated, container }) {
                         ))}
                     </Box>
 
-                    {/* Network + Restart Policy */}
-                    <Flex gap="3">
-                        <Box style={{ flex: 1 }}>
-                            <Text size="2" weight="bold" mb="1" style={{ display: 'block' }}>{t('docker.network')}</Text>
-                            <select value={network} onChange={(e) => setNetwork(e.target.value)}
-                                style={{ width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid var(--gray-6)', fontSize: 13, background: 'var(--color-background)' }}>
-                                <option value="">{t('docker.network_default')}</option>
-                                {networks.map(n => (
-                                    <option key={n.id} value={n.name}>{n.name} ({n.driver})</option>
+                    <CollapsibleSection title={t('docker.advanced_settings')} expanded={advancedOpen} onToggle={() => setAdvancedOpen(v => !v)}>
+                        <Flex direction="column" gap="3">
+                            <Box>
+                                <Flex align="center" justify="between" mb="1">
+                                    <Text size="2" weight="bold">{t('docker.port_mappings')}</Text>
+                                    <Button variant="ghost" size="1" onClick={addPort}><Plus size={14} /> {t('docker.add_port')}</Button>
+                                </Flex>
+                                {ports.map((p, i) => (
+                                    <Flex key={i} gap="2" align="center" mb="1" style={{ width: '100%' }}>
+                                        <TextField.Root placeholder={t('docker.host_port')} value={p.host_port}
+                                            onChange={(e) => updatePort(i, 'host_port', e.target.value)} style={{ flex: '1 1 0', minWidth: 0 }} />
+                                        <Text size="2">:</Text>
+                                        <TextField.Root placeholder={t('docker.container_port')} value={p.container_port}
+                                            onChange={(e) => updatePort(i, 'container_port', e.target.value)} style={{ flex: '1 1 0', minWidth: 0 }} />
+                                        <select value={p.protocol} onChange={(e) => updatePort(i, 'protocol', e.target.value)}
+                                            style={{ flex: '0 0 96px', padding: '6px 8px', borderRadius: 6, border: '1px solid var(--gray-6)', fontSize: 13, background: 'var(--color-background)' }}>
+                                            <option value="tcp">TCP</option>
+                                            <option value="udp">UDP</option>
+                                        </select>
+                                        <Button variant="ghost" size="1" color="red" onClick={() => removePort(i)}><X size={14} /></Button>
+                                    </Flex>
                                 ))}
-                            </select>
-                        </Box>
-                        <Box style={{ flex: 1 }}>
-                            <Text size="2" weight="bold" mb="1" style={{ display: 'block' }}>{t('docker.restart_policy')}</Text>
-                            <select value={restartPolicy} onChange={(e) => setRestartPolicy(e.target.value)}
-                                style={{ width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid var(--gray-6)', fontSize: 13, background: 'var(--color-background)' }}>
-                                <option value="no">{t('docker.restart_no')}</option>
-                                <option value="always">{t('docker.restart_always')}</option>
-                                <option value="unless-stopped">{t('docker.restart_unless_stopped')}</option>
-                                <option value="on-failure">{t('docker.restart_on_failure')}</option>
-                            </select>
-                        </Box>
-                    </Flex>
+                            </Box>
 
-                    {/* Command */}
-                    <Box>
-                        <Text size="2" weight="bold" mb="1" style={{ display: 'block' }}>{t('docker.command')}</Text>
-                        <TextField.Root placeholder={t('docker.command_placeholder')} value={command} onChange={(e) => setCommand(e.target.value)} />
-                    </Box>
+                            <Flex gap="3" wrap="wrap">
+                                <Box style={{ flex: '1 1 240px' }}>
+                                    <Text size="2" weight="bold" mb="1" style={{ display: 'block' }}>{t('docker.network')}</Text>
+                                    <select value={network} onChange={(e) => setNetwork(e.target.value)}
+                                        style={{ width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid var(--gray-6)', fontSize: 13, background: 'var(--color-background)' }}>
+                                        <option value="">{t('docker.network_default')}</option>
+                                        {networks.map(n => (
+                                            <option key={n.id} value={n.name}>{n.name} ({n.driver})</option>
+                                        ))}
+                                    </select>
+                                </Box>
+                                <Box style={{ flex: '1 1 240px' }}>
+                                    <Text size="2" weight="bold" mb="1" style={{ display: 'block' }}>{t('docker.restart_policy')}</Text>
+                                    <select value={restartPolicy} onChange={(e) => setRestartPolicy(e.target.value)}
+                                        style={{ width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid var(--gray-6)', fontSize: 13, background: 'var(--color-background)' }}>
+                                        <option value="no">{t('docker.restart_no')}</option>
+                                        <option value="always">{t('docker.restart_always')}</option>
+                                        <option value="unless-stopped">{t('docker.restart_unless_stopped')}</option>
+                                        <option value="on-failure">{t('docker.restart_on_failure')}</option>
+                                    </select>
+                                </Box>
+                            </Flex>
 
-                    {/* Resource Limits */}
-                    <Flex gap="3">
-                        <Box style={{ flex: 1 }}>
-                            <Text size="2" weight="bold" mb="1" style={{ display: 'block' }}>{t('docker.memory_limit')}</Text>
-                            <TextField.Root type="number" placeholder="0" value={memoryLimit} onChange={(e) => setMemoryLimit(e.target.value)} />
-                        </Box>
-                        <Box style={{ flex: 1 }}>
-                            <Text size="2" weight="bold" mb="1" style={{ display: 'block' }}>{t('docker.cpu_limit')}</Text>
-                            <TextField.Root type="number" placeholder="0" step="0.1" value={cpuLimit} onChange={(e) => setCpuLimit(e.target.value)} />
-                        </Box>
-                    </Flex>
+                            <Flex gap="3">
+                                <Box style={{ flex: 1 }}>
+                                    <Text size="2" weight="bold" mb="1" style={{ display: 'block' }}>{t('docker.memory_limit')}</Text>
+                                    <TextField.Root type="number" placeholder="0" value={memoryLimit} onChange={(e) => setMemoryLimit(e.target.value)} />
+                                </Box>
+                                <Box style={{ flex: 1 }}>
+                                    <Text size="2" weight="bold" mb="1" style={{ display: 'block' }}>{t('docker.cpu_limit')}</Text>
+                                    <TextField.Root type="number" placeholder="0" step="0.1" value={cpuLimit} onChange={(e) => setCpuLimit(e.target.value)} />
+                                </Box>
+                            </Flex>
+
+                            <Box>
+                                <Text size="2" weight="bold" mb="1" style={{ display: 'block' }}>{t('docker.command')}</Text>
+                                <TextArea rows={3} placeholder={t('docker.command_placeholder')} value={command} onChange={(e) => setCommand(e.target.value)} />
+                            </Box>
+                        </Flex>
+                    </CollapsibleSection>
 
                     {error && <Text size="2" color="red">{error}</Text>}
                 </Flex>
@@ -1366,5 +802,23 @@ function RunContainerDialog({ open, onClose, onCreated, container }) {
                 </Flex>
             </Dialog.Content>
         </Dialog.Root>
+    )
+}
+
+function CollapsibleSection({ title, expanded, onToggle, children }) {
+    return (
+        <Box style={{ borderTop: '1px solid var(--gray-4)', paddingTop: '12px' }}>
+            <Button
+                type="button"
+                variant="ghost"
+                color="gray"
+                onClick={onToggle}
+                style={{ width: '100%', justifyContent: 'space-between', paddingInline: 0 }}
+            >
+                <Text size="2" weight="bold">{title}</Text>
+                {expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+            </Button>
+            {expanded && <Box mt="3">{children}</Box>}
+        </Box>
     )
 }

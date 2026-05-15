@@ -63,7 +63,7 @@ func (p *Plugin) Init(ctx *plugin.Context) error {
 		Title:   "Pdai MCP Server",
 		Version: "1.0.0",
 	}, &mcp.ServerOptions{
-		Instructions: "Pdai is an AI-First lightweight server management panel. Use these tools to manage reverse proxies, deploy projects, control Docker stacks, manage databases, and generate Docker Compose configurations.",
+		Instructions: "Pdai is an AI-First lightweight server management panel. Use these tools to manage reverse proxies, deploy projects, manage containers, manage databases, and generate Docker Compose configurations.",
 		Logger:       slog.New(logger.Handler()),
 	})
 

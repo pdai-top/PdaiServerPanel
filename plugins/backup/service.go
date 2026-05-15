@@ -147,7 +147,7 @@ func (s *Service) GetConfig() (*BackupConfig, error) {
 		cfg = BackupConfig{
 			ID:             1,
 			TargetType:     "local",
-			LocalPath:      "/var/backups/pdai",
+			LocalPath:      filepath.Join(s.dataDir, "backups"),
 			CronExpr:       "0 2 * * *",
 			RetainCount:    10,
 			RetainDays:     30,

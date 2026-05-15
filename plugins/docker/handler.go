@@ -19,14 +19,13 @@ import (
 
 // Handler implements the REST API for Docker management.
 type Handler struct {
-	svc         *Service
 	client      *Client
 	reconnectFn func() bool // called after daemon restart to reconnect
 }
 
 // NewHandler creates a Docker Handler.
-func NewHandler(svc *Service, client *Client) *Handler {
-	return &Handler{svc: svc, client: client}
+func NewHandler(client *Client) *Handler {
+	return &Handler{client: client}
 }
 
 func (h *Handler) ctx() (context.Context, context.CancelFunc) {
@@ -47,154 +46,6 @@ func (h *Handler) Info(c *gin.Context) {
 	c.JSON(http.StatusOK, info)
 }
 
-// ── Stacks ──
-
-// ListStacks returns all stacks.
-func (h *Handler) ListStacks(c *gin.Context) {
-	stacks, err := h.svc.ListStacks()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"stacks": stacks})
-}
-
-// GetStack returns a single stack.
-func (h *Handler) GetStack(c *gin.Context) {
-	id, err := parseID(c)
-	if err != nil {
-		return
-	}
-	stack, err := h.svc.GetStack(id)
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Stack not found"})
-		return
-	}
-	c.JSON(http.StatusOK, stack)
-}
-
-// CreateStack creates a new stack.
-func (h *Handler) CreateStack(c *gin.Context) {
-	var req CreateStackRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-	stack, err := h.svc.CreateStack(&req)
-	if err != nil {
-		// If the stack was created but auto-start failed, return 201 with a warning.
-		if stack != nil {
-			c.JSON(http.StatusCreated, gin.H{"data": stack, "warning": err.Error()})
-			return
-		}
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-	c.JSON(http.StatusCreated, stack)
-}
-
-// UpdateStack updates a stack.
-func (h *Handler) UpdateStack(c *gin.Context) {
-	id, err := parseID(c)
-	if err != nil {
-		return
-	}
-	var req CreateStackRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-	stack, err := h.svc.UpdateStack(id, &req)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, stack)
-}
-
-// DeleteStack deletes a stack.
-func (h *Handler) DeleteStack(c *gin.Context) {
-	id, err := parseID(c)
-	if err != nil {
-		return
-	}
-	if err := h.svc.DeleteStack(id); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"message": "Stack deleted"})
-}
-
-// StackUp starts a stack.
-func (h *Handler) StackUp(c *gin.Context) {
-	id, err := parseID(c)
-	if err != nil {
-		return
-	}
-	if err := h.svc.StackUp(id); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"message": "Stack started"})
-}
-
-// StackDown stops a stack.
-func (h *Handler) StackDown(c *gin.Context) {
-	id, err := parseID(c)
-	if err != nil {
-		return
-	}
-	if err := h.svc.StackDown(id); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"message": "Stack stopped"})
-}
-
-// StackRestart restarts a stack.
-func (h *Handler) StackRestart(c *gin.Context) {
-	id, err := parseID(c)
-	if err != nil {
-		return
-	}
-	if err := h.svc.StackRestart(id); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"message": "Stack restarted"})
-}
-
-// StackPull pulls latest images for a stack.
-func (h *Handler) StackPull(c *gin.Context) {
-	id, err := parseID(c)
-	if err != nil {
-		return
-	}
-	if err := h.svc.StackPull(id); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"message": "Images pulled"})
-}
-
-// StackLogs returns recent logs for a stack.
-func (h *Handler) StackLogs(c *gin.Context) {
-	id, err := parseID(c)
-	if err != nil {
-		return
-	}
-	tail := sanitizeTail(c.DefaultQuery("tail", "200"))
-	logs, err := h.svc.StackLogs(id, tail)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"logs": logs})
-}
-
-// ── Containers ──
-
-// ListContainers returns all containers.
 func (h *Handler) ListContainers(c *gin.Context) {
 	if h.client == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Docker is not available"})
@@ -467,6 +318,65 @@ func (h *Handler) RunContainer(c *gin.Context) {
 
 // ── Images ──
 
+// RunContainerStream creates and starts a standalone container while streaming
+// image-pull and create/start progress back to the browser via SSE.
+func (h *Handler) RunContainerStream(c *gin.Context) {
+	var req RunContainerRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if req.Image == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "image is required"})
+		return
+	}
+	switch req.RestartPolicy {
+	case "", "no", "always", "unless-stopped", "on-failure":
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid restart_policy, must be one of: no, always, unless-stopped, on-failure"})
+		return
+	}
+
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("X-Accel-Buffering", "no")
+	c.Writer.Flush()
+
+	writeEvent := func(event, data string) {
+		fmt.Fprintf(c.Writer, "event: %s\ndata: %s\n\n", event, data)
+		c.Writer.Flush()
+	}
+	writeLog := func(data string) {
+		writeEvent("log", data)
+	}
+
+	ctx := c.Request.Context()
+	writeLog("Pulling image: " + req.Image)
+	if reader, err := h.client.PullImage(ctx, req.Image); err == nil {
+		scanner := bufio.NewScanner(reader)
+		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+		for scanner.Scan() {
+			writeLog(scanner.Text())
+		}
+		reader.Close()
+		if err := scanner.Err(); err != nil {
+			writeLog("Image pull log stream ended with warning: " + err.Error())
+		}
+	} else {
+		writeLog("Image pull skipped or failed; continuing with local image if available: " + err.Error())
+	}
+
+	writeLog("Creating and starting container...")
+	id, err := h.client.RunContainer(ctx, &req)
+	if err != nil {
+		writeEvent("error", err.Error())
+		return
+	}
+	writeLog("Container created: " + id)
+	writeEvent("done", id)
+}
+
 // ListImages returns all local images.
 func (h *Handler) ListImages(c *gin.Context) {
 	ctx, cancel := h.ctx()
@@ -710,49 +620,6 @@ func (h *Handler) ContainerLogsWS(c *gin.Context) {
 			line = line[8:]
 		}
 		if err := conn.WriteMessage(websocket.TextMessage, line); err != nil {
-			return
-		}
-	}
-}
-
-// StackLogsWS streams stack logs via WebSocket.
-func (h *Handler) StackLogsWS(c *gin.Context) {
-	conn, err := wsUpgrader.Upgrade(c.Writer, c.Request, auth.WSUpgradeResponseHeader(c))
-	if err != nil {
-		return
-	}
-	defer conn.Close()
-
-	id, err := parseID(c)
-	if err != nil {
-		conn.WriteMessage(websocket.TextMessage, []byte("Error: invalid id"))
-		return
-	}
-	tail := sanitizeTail(c.DefaultQuery("tail", "100"))
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	go func() {
-		for {
-			if _, _, err := conn.ReadMessage(); err != nil {
-				cancel()
-				return
-			}
-		}
-	}()
-
-	reader, err := h.svc.StackLogsFollow(ctx, id, tail)
-	if err != nil {
-		conn.WriteMessage(websocket.TextMessage, []byte("Error: "+err.Error()))
-		return
-	}
-	defer reader.Close()
-
-	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 0, 64*1024), 64*1024)
-	for scanner.Scan() {
-		if err := conn.WriteMessage(websocket.TextMessage, scanner.Bytes()); err != nil {
 			return
 		}
 	}

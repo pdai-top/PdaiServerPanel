@@ -35,6 +35,29 @@ func NewManager(cfg *config.Config) *Manager {
 	return &Manager{cfg: cfg}
 }
 
+// EnsureBinary installs the configured Caddy binary when it is not present.
+func (m *Manager) EnsureBinary() error {
+	if m.binaryAvailable() {
+		return nil
+	}
+	targetVer := m.LatestPinnedVersion()
+	log.Printf("Caddy binary not found at %s; installing v%s", m.cfg.CaddyBin, targetVer)
+	if _, err := m.Upgrade(targetVer); err != nil {
+		return fmt.Errorf("install caddy: %w", err)
+	}
+	return nil
+}
+
+func (m *Manager) binaryAvailable() bool {
+	if _, err := os.Stat(m.cfg.CaddyBin); err == nil {
+		return true
+	}
+	if _, err := exec.LookPath(m.cfg.CaddyBin); err == nil {
+		return true
+	}
+	return false
+}
+
 // WriteCaddyfile atomically writes a Caddyfile:
 //  1. Write to temp file
 //  2. Validate with `caddy validate`
@@ -187,8 +210,17 @@ func (m *Manager) Start() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	if !m.binaryAvailable() {
+		targetVer := m.LatestPinnedVersion()
+		log.Printf("Caddy binary not found at %s; installing v%s before start", m.cfg.CaddyBin, targetVer)
+		if _, err := m.upgradeLocked(targetVer); err != nil {
+			return fmt.Errorf("install caddy before start: %w", err)
+		}
+	}
+
 	if m.IsRunning() {
-		return fmt.Errorf("caddy is already running")
+		log.Println("Caddy is already running")
+		return nil
 	}
 
 	// Ensure Caddyfile exists before starting (without lock, already held)
@@ -227,6 +259,9 @@ func (m *Manager) Start() error {
 		}
 		return fmt.Errorf("caddy start failed: %v", err)
 	}
+	if !m.waitForRunning(5 * time.Second) {
+		return fmt.Errorf("caddy start completed but running status could not be confirmed")
+	}
 	log.Println("Caddy started successfully")
 	return nil
 }
@@ -247,13 +282,113 @@ func (m *Manager) Stop() error {
 
 // IsRunning checks if a Caddy process is currently running
 func (m *Manager) IsRunning() bool {
-	// Try to hit the admin API
-	cmd := exec.Command("curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", m.cfg.AdminAPI+"/config/")
-	output, err := cmd.Output()
+	return m.adminAPIHealthy(2*time.Second) || m.caddyProcessExists()
+}
+
+func (m *Manager) waitForRunning(timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if m.IsRunning() {
+			return true
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return m.IsRunning()
+}
+
+func (m *Manager) adminAPIHealthy(timeout time.Duration) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	endpoint := strings.TrimRight(m.cfg.AdminAPI, "/") + "/config/"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return false
 	}
-	return strings.TrimSpace(string(output)) == "200"
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
+}
+
+func (m *Manager) caddyProcessExists() bool {
+	if runtime.GOOS != "linux" {
+		return false
+	}
+
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || !isNumeric(entry.Name()) {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "cmdline"))
+		if err != nil || len(data) == 0 {
+			continue
+		}
+		args := splitProcCmdline(data)
+		if len(args) == 0 || !m.isCaddyCommand(args[0]) {
+			continue
+		}
+		if cfgPath, ok := caddyConfigArg(args); ok && samePath(cfgPath, m.cfg.CaddyfilePath) {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *Manager) isCaddyCommand(command string) bool {
+	base := filepath.Base(command)
+	configuredBase := filepath.Base(m.cfg.CaddyBin)
+	return base == "caddy" || base == configuredBase
+}
+
+func splitProcCmdline(data []byte) []string {
+	parts := strings.Split(strings.TrimRight(string(data), "\x00"), "\x00")
+	args := parts[:0]
+	for _, part := range parts {
+		if part != "" {
+			args = append(args, part)
+		}
+	}
+	return args
+}
+
+func caddyConfigArg(args []string) (string, bool) {
+	for i, arg := range args {
+		if (arg == "--config" || arg == "-c") && i+1 < len(args) {
+			return args[i+1], true
+		}
+		if strings.HasPrefix(arg, "--config=") {
+			return strings.TrimPrefix(arg, "--config="), true
+		}
+	}
+	return "", false
+}
+
+func samePath(a, b string) bool {
+	if filepath.Clean(a) == filepath.Clean(b) {
+		return true
+	}
+	absA, errA := filepath.Abs(a)
+	absB, errB := filepath.Abs(b)
+	return errA == nil && errB == nil && absA == absB
+}
+
+func isNumeric(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // Status returns the current Caddy status
@@ -367,6 +502,10 @@ func (m *Manager) Upgrade(targetVer string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	return m.upgradeLocked(targetVer)
+}
+
+func (m *Manager) upgradeLocked(targetVer string) (string, error) {
 	if targetVer == "" {
 		targetVer = m.LatestPinnedVersion()
 	}
@@ -441,6 +580,10 @@ func (m *Manager) Upgrade(targetVer string) (string, error) {
 		// Rollback
 		os.Rename(backupPath, caddyBin)
 		return currentVer, fmt.Errorf("read new binary: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(caddyBin), 0755); err != nil {
+		os.Rename(backupPath, caddyBin)
+		return currentVer, fmt.Errorf("create caddy binary directory: %w", err)
 	}
 	if err := os.WriteFile(caddyBin, data, 0755); err != nil {
 		os.Rename(backupPath, caddyBin)

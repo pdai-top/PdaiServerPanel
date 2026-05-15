@@ -180,7 +180,7 @@ func (s *Service) CreateRuntimeStream(req *CreateRuntimeRequest, progressCb func
 
 	// Generate compose file.
 	tz := getSystemTimezone()
-	composeContent := GenerateFPMCompose(rt, tz)
+	composeContent := GenerateFPMCompose(rt, tz, s.dataDir)
 	if err := os.WriteFile(filepath.Join(rtDir, "docker-compose.yml"), []byte(composeContent), 0644); err != nil {
 		return nil, fmt.Errorf("write compose file: %w", err)
 	}
@@ -499,7 +499,7 @@ func (s *Service) RemoveExtension(id uint, extName string, progressCb func(strin
 		}
 		// Regenerate compose without custom image.
 		tz := getSystemTimezone()
-		composeContent := GenerateFPMCompose(rt, tz)
+		composeContent := GenerateFPMCompose(rt, tz, s.dataDir)
 		if err := os.WriteFile(filepath.Join(rt.DataDir, "docker-compose.yml"), []byte(composeContent), 0644); err != nil {
 			return fmt.Errorf("write compose: %w", err)
 		}
@@ -537,7 +537,7 @@ func (s *Service) rebuildRuntimeImage(rt *PHPRuntime, extensions []string, progr
 
 	// Regenerate compose with custom image.
 	tz := getSystemTimezone()
-	composeContent := GenerateFPMCompose(rt, tz)
+	composeContent := GenerateFPMCompose(rt, tz, s.dataDir)
 	if err := os.WriteFile(filepath.Join(rt.DataDir, "docker-compose.yml"), []byte(composeContent), 0644); err != nil {
 		return fmt.Errorf("write compose: %w", err)
 	}
@@ -619,11 +619,11 @@ func (s *Service) CreateSite(req *CreateSiteRequest, progressCb func(string)) (*
 
 	rootPath := req.RootPath
 	if rootPath == "" {
-		rootPath = filepath.Join("/var/www", req.Domain)
+		rootPath = filepath.Join(s.dataDir, "www", req.Domain)
 	}
 
 	// Validate root path.
-	if err := ValidateRootPath(rootPath); err != nil {
+	if err := ValidateRootPath(rootPath, s.dataDir); err != nil {
 		return nil, err
 	}
 

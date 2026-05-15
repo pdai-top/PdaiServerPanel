@@ -59,6 +59,9 @@ func main() {
 	caddyMgr := caddy.NewManager(cfg)
 	hostSvc := service.NewHostService(db, caddyMgr, cfg)
 
+	if err := caddyMgr.EnsureBinary(); err != nil {
+		log.Printf("[ERROR] Failed to ensure Caddy binary: %v", err)
+	}
 	if err := caddyMgr.EnsureCaddyfile(); err != nil {
 		log.Printf("[ERROR] Failed to ensure Caddyfile: %v", err)
 	}

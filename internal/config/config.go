@@ -37,8 +37,8 @@ func Load() *Config {
 		Port:          envOrDefault("PDAI_PORT", "39921"),
 		DBPath:        envOrDefault("PDAI_DB_PATH", filepath.Join(dataDir, "Pdai.db")),
 		JWTSecret:     resolveJWTSecret(dataDir),
-		CaddyBin:      envOrDefault("PDAI_CADDY_BIN", "caddy"),
-		CaddyfilePath: envOrDefault("PDAI_CADDYFILE_PATH", filepath.Join(dataDir, "Caddyfile")),
+		CaddyBin:      envOrDefault("PDAI_CADDY_BIN", "./data/caddy/caddy"),
+		CaddyfilePath: envOrDefault("PDAI_CADDYFILE_PATH", "./data/caddy/Caddyfile"),
 		LogDir:        envOrDefault("PDAI_LOG_DIR", filepath.Join(dataDir, "logs")),
 		DataDir:       dataDir,
 		AdminAPI:      envOrDefault("PDAI_ADMIN_API", "http://localhost:2019"),
@@ -145,17 +145,34 @@ func writeDefaultConfig(path string) error {
 		return fmt.Errorf("generate jwt secret: %w", err)
 	}
 	secret := hex.EncodeToString(secretBytes)
-	content := fmt.Sprintf(`# Pdai single-binary configuration
-# Generated automatically on first startup. Edit this file and restart if needed.
+	content := fmt.Sprintf(`# Pdai 单文件部署配置
+# 首次启动时自动生成。修改本文件后，请重启面板使配置生效。
 
+# 面板 HTTP 监听端口
 PDAI_PORT=39921
+
+# 面板数据目录。数据库、日志、Caddy、站点文件、备份等默认都会放在此目录下
 PDAI_DATA_DIR=./data
+
+# SQLite 数据库文件路径
 PDAI_DB_PATH=./data/Pdai.db
+
+# JWT 签名密钥。请勿泄露；修改后现有登录会话会失效
 PDAI_JWT_SECRET=%s
-PDAI_CADDY_BIN=caddy
-PDAI_CADDYFILE_PATH=./data/Caddyfile
+
+# Caddy 可执行文件路径。若文件不存在，面板会自动下载对应架构的 Caddy 到此路径
+PDAI_CADDY_BIN=./data/caddy/caddy
+
+# Caddyfile 配置文件路径
+PDAI_CADDYFILE_PATH=./data/caddy/Caddyfile
+
+# 面板和 Caddy 日志目录
 PDAI_LOG_DIR=./data/logs
+
+# Caddy Admin API 地址。通常无需修改
 PDAI_ADMIN_API=http://localhost:2019
+
+# Gin 运行模式。生产环境建议保持 release
 GIN_MODE=release
 `, secret)
 	return os.WriteFile(path, []byte(content), 0600)

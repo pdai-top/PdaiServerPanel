@@ -32,8 +32,8 @@ func ValidateExtensionNames(names []string) error {
 
 // ── Path validation ──
 
-// ValidateRootPath ensures the path is under /var/www/ and has no traversal.
-func ValidateRootPath(path string) error {
+// ValidateRootPath ensures the path is under the panel data www directory and has no traversal.
+func ValidateRootPath(path string, dataDir string) error {
 	if path == "" {
 		return fmt.Errorf("root path cannot be empty")
 	}
@@ -41,8 +41,9 @@ func ValidateRootPath(path string) error {
 		return fmt.Errorf("root path cannot contain '..'")
 	}
 	cleaned := filepath.Clean(path)
-	if !strings.HasPrefix(cleaned, "/var/www/") {
-		return fmt.Errorf("root path must be under /var/www/")
+	wwwRoot := filepath.Clean(filepath.Join(dataDir, "www"))
+	if cleaned != wwwRoot && !strings.HasPrefix(cleaned, wwwRoot+string(filepath.Separator)) {
+		return fmt.Errorf("root path must be under %s", wwwRoot)
 	}
 	// Reject Caddyfile-breaking characters.
 	if strings.ContainsAny(cleaned, " \t\n\r{}\"'`;#$\\") {

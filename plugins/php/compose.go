@@ -3,11 +3,12 @@ package php
 import (
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 )
 
 // GenerateFPMCompose creates docker-compose.yml for a PHP-FPM runtime.
-func GenerateFPMCompose(rt *PHPRuntime, timezone string) string {
+func GenerateFPMCompose(rt *PHPRuntime, timezone string, dataDir string) string {
 	image := rt.CustomImage
 	if image == "" {
 		if v := FindVersion(rt.Version, RuntimeFPM); v != nil {
@@ -28,6 +29,8 @@ func GenerateFPMCompose(rt *PHPRuntime, timezone string) string {
 		buildSection = fmt.Sprintf("    image: %s\n", image)
 	}
 
+	wwwRoot := filepath.Join(dataDir, "www")
+
 	return fmt.Sprintf(`services:
   php-fpm:
 %s    container_name: %s
@@ -35,7 +38,7 @@ func GenerateFPMCompose(rt *PHPRuntime, timezone string) string {
     ports:
       - "127.0.0.1:%d:9000"
     volumes:
-      - /var/www:/var/www
+      - %s:/var/www
       - ./conf.d/99-pdai.ini:/usr/local/etc/php/conf.d/99-pdai.ini:ro
       - ./php-fpm.d/zz-pdai.conf:/usr/local/etc/php-fpm.d/zz-pdai.conf:ro
     deploy:
@@ -47,7 +50,7 @@ func GenerateFPMCompose(rt *PHPRuntime, timezone string) string {
     labels:
       pdai.plugin: php
       pdai.runtime: "%s"
-`, buildSection, rt.ContainerName, rt.Port, rt.MemoryLimit, timezone, rt.ContainerName)
+`, buildSection, rt.ContainerName, rt.Port, wwwRoot, rt.MemoryLimit, timezone, rt.ContainerName)
 }
 
 // GenerateFrankenCompose creates docker-compose.yml for a FrankenPHP site container.

@@ -3,6 +3,7 @@ package service
 import (
 	"fmt"
 	"log"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -130,6 +131,8 @@ func (s *HostService) Create(req *model.HostCreateRequest) (*model.Host, error) 
 		return nil, fmt.Errorf("invalid host_type: %s (must be 'proxy', 'redirect', 'static', or 'php')", hostType)
 	}
 
+	applyDefaultSitePaths(req, s.cfg.DataDir)
+
 	// Validate based on type
 	switch hostType {
 	case "redirect":
@@ -242,6 +245,19 @@ func (s *HostService) Create(req *model.HostCreateRequest) (*model.Host, error) 
 	}
 
 	return s.Get(host.ID)
+}
+
+func applyDefaultSitePaths(req *model.HostCreateRequest, dataDir string) {
+	if req == nil || req.Domain == "" {
+		return
+	}
+	siteBase := filepath.Join(dataDir, "www", req.Domain)
+	if req.RootPath == "" {
+		req.RootPath = filepath.Join(siteBase, "index")
+	}
+	if req.ErrorPagePath == "" {
+		req.ErrorPagePath = filepath.Join(siteBase, "default")
+	}
 }
 
 // Update modifies an existing host

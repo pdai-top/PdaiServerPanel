@@ -176,31 +176,6 @@ func (ts *ToolService) RegisterTools(srv *mcp.Server) {
 		Description: "Get the build logs for a project's latest or specific build.",
 	}, ts.handleGetBuildLogs)
 
-	// ── Docker Management ──
-	mcp.AddTool(srv, &mcp.Tool{
-		Name:        "list_stacks",
-		Title:       "List Docker Compose Stacks",
-		Description: "List all Docker Compose stacks. Returns stack name, status, and service count.",
-	}, ts.handleListStacks)
-
-	mcp.AddTool(srv, &mcp.Tool{
-		Name:        "create_stack",
-		Title:       "Create Docker Compose Stack",
-		Description: "Create a new Docker Compose stack from YAML content.",
-	}, ts.handleCreateStack)
-
-	mcp.AddTool(srv, &mcp.Tool{
-		Name:        "control_stack",
-		Title:       "Control Docker Stack",
-		Description: "Perform an action on a Docker Compose stack: up, down, or restart.",
-	}, ts.handleControlStack)
-
-	mcp.AddTool(srv, &mcp.Tool{
-		Name:        "get_stack_logs",
-		Title:       "Get Stack Logs",
-		Description: "Get recent logs from a Docker Compose stack.",
-	}, ts.handleGetStackLogs)
-
 	// ── Database Management ──
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_db_instances",
@@ -650,104 +625,6 @@ func (ts *ToolService) handleGetBuildLogs(ctx context.Context, req *mcp.CallTool
 }
 
 // ──────────────────────────── Docker Tools ────────────────────────────
-
-func (ts *ToolService) handleListStacks(ctx context.Context, req *mcp.CallToolRequest, _ emptyInput) (*mcp.CallToolResult, any, error) {
-	if r, denied := requirePerm(ctx, "docker:read"); denied {
-		return r, nil, nil
-	}
-	token := tokenFromContext(ctx)
-	data, err := ts.caller.Get("/api/plugins/docker/stacks", token)
-	if err != nil {
-		r, _ := errorResult("failed to list stacks: " + err.Error())
-		return r, nil, nil
-	}
-	return &mcp.CallToolResult{
-		Content: []mcp.Content{&mcp.TextContent{Text: string(data)}},
-	}, nil, nil
-}
-
-type createStackInput struct {
-	Name        string `json:"name" jsonschema:"required"`
-	ComposeYAML string `json:"compose_yaml" jsonschema:"required"`
-	EnvContent  string `json:"env,omitempty"`
-}
-
-func (ts *ToolService) handleCreateStack(ctx context.Context, req *mcp.CallToolRequest, input createStackInput) (*mcp.CallToolResult, any, error) {
-	if r, denied := requirePerm(ctx, "docker:write"); denied {
-		return r, nil, nil
-	}
-	token := tokenFromContext(ctx)
-	body := map[string]interface{}{
-		"name":         input.Name,
-		"compose_file": input.ComposeYAML,
-	}
-	if input.EnvContent != "" {
-		body["env_file"] = input.EnvContent
-	}
-	data, err := ts.caller.Post("/api/plugins/docker/stacks", body, token)
-	if err != nil {
-		r, _ := errorResult("failed to create stack: " + err.Error())
-		return r, nil, nil
-	}
-	return &mcp.CallToolResult{
-		Content: []mcp.Content{&mcp.TextContent{Text: string(data)}},
-	}, nil, nil
-}
-
-type controlStackInput struct {
-	StackID uint   `json:"stack_id" jsonschema:"required"`
-	Action  string `json:"action" jsonschema:"required"`
-}
-
-func (ts *ToolService) handleControlStack(ctx context.Context, req *mcp.CallToolRequest, input controlStackInput) (*mcp.CallToolResult, any, error) {
-	if r, denied := requirePerm(ctx, "docker:write"); denied {
-		return r, nil, nil
-	}
-	// Validate action against allowed values to prevent path traversal
-	switch input.Action {
-	case "up", "down", "restart":
-		// valid
-	default:
-		r, _ := errorResult("invalid action: must be 'up', 'down', or 'restart'")
-		return r, nil, nil
-	}
-
-	token := tokenFromContext(ctx)
-	path := fmt.Sprintf("/api/plugins/docker/stacks/%d/%s", input.StackID, input.Action)
-	data, err := ts.caller.Post(path, nil, token)
-	if err != nil {
-		r, _ := errorResult("failed to " + input.Action + " stack: " + err.Error())
-		return r, nil, nil
-	}
-	return &mcp.CallToolResult{
-		Content: []mcp.Content{&mcp.TextContent{Text: string(data)}},
-	}, nil, nil
-}
-
-type getStackLogsInput struct {
-	StackID uint `json:"stack_id" jsonschema:"required"`
-	Tail    int  `json:"tail,omitempty"`
-}
-
-func (ts *ToolService) handleGetStackLogs(ctx context.Context, req *mcp.CallToolRequest, input getStackLogsInput) (*mcp.CallToolResult, any, error) {
-	if r, denied := requirePerm(ctx, "docker:read"); denied {
-		return r, nil, nil
-	}
-	token := tokenFromContext(ctx)
-	tail := 100
-	if input.Tail > 0 {
-		tail = input.Tail
-	}
-	path := fmt.Sprintf("/api/plugins/docker/stacks/%d/logs?tail=%d", input.StackID, tail)
-	data, err := ts.caller.Get(path, token)
-	if err != nil {
-		r, _ := errorResult("failed to get stack logs: " + err.Error())
-		return r, nil, nil
-	}
-	return &mcp.CallToolResult{
-		Content: []mcp.Content{&mcp.TextContent{Text: string(data)}},
-	}, nil, nil
-}
 
 // ──────────────────────────── Database Tools ────────────────────────────
 
