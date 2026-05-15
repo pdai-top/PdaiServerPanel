@@ -142,58 +142,11 @@ func (h *SettingHandler) Update(c *gin.Context) {
 		ctx, cancel := context.WithTimeout(c.Request.Context(), 20*time.Second)
 		defer cancel()
 
-		if hasSystemd() {
-			var unitName string
-			if value == "true" {
-				var err error
-				unitName, err = installPanelServiceUnit()
-				if err != nil {
-					c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-					return
-				}
-			} else {
-				unitName = detectPanelServiceUnit()
-			}
-			if unitName != "" {
-				if output, err := exec.CommandContext(ctx, "systemctl", "daemon-reload").CombinedOutput(); err != nil {
-					c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to reload systemd: %v %s", err, strings.TrimSpace(string(output)))})
-					return
-				}
-
-				cmdName := "disable"
-				if value == "true" {
-					cmdName = "enable"
-				}
-				cmd := exec.CommandContext(ctx, "systemctl", cmdName, unitName)
-				if output, err := cmd.CombinedOutput(); err != nil {
-					c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to %s %s: %v %s", cmdName, unitName, err, strings.TrimSpace(string(output)))})
-					return
-				}
-			}
-		} else if hasOpenRC() {
-			var serviceName string
-			if value == "true" {
-				var err error
-				serviceName, err = installPanelOpenRCService()
-				if err != nil {
-					c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-					return
-				}
-			} else {
-				serviceName = detectPanelOpenRCService()
-			}
-			if serviceName != "" {
-				cmdName := "del"
-				if value == "true" {
-					cmdName = "add"
-				}
-				cmd := exec.CommandContext(ctx, "rc-update", cmdName, serviceName, "default")
-				if output, err := cmd.CombinedOutput(); err != nil {
-					c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to rc-update %s %s: %v %s", cmdName, serviceName, err, strings.TrimSpace(string(output)))})
-					return
-				}
-			}
+		if err := setPanelCronAutostart(ctx, value == "true"); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
 		}
+		disableLegacyPanelAutostart(ctx)
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Setting updated"})
@@ -203,6 +156,86 @@ func (h *SettingHandler) Update(c *gin.Context) {
 // each label `a-z0-9` with optional `-` (not at edges) AND 鈮?3 chars
 // per RFC 1035, total 鈮?53. PB-R3-L2 fix.
 var wildcardDomainRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$`)
+
+const panelCronMarker = "# Pdai panel autostart"
+
+func setPanelCronAutostart(ctx context.Context, enabled bool) error {
+	if _, err := exec.LookPath("crontab"); err != nil {
+		return fmt.Errorf("crontab is not available; install or enable cron/crond to use panel autostart")
+	}
+
+	existing, err := exec.CommandContext(ctx, "crontab", "-l").CombinedOutput()
+	if err != nil {
+		existing = nil
+	}
+	lines := filterPanelCronLines(strings.Split(strings.ReplaceAll(string(existing), "\r\n", "\n"), "\n"))
+	if enabled {
+		exePath, err := panelExecutablePath()
+		if err != nil {
+			return err
+		}
+		workDir := filepath.Dir(exePath)
+		cmd := fmt.Sprintf(
+			"@reboot cd %s && GIN_MODE=release %s >/dev/null 2>&1 & %s",
+			shellSingleQuote(workDir),
+			shellSingleQuote(exePath),
+			panelCronMarker,
+		)
+		lines = append(lines, cmd)
+	}
+
+	content := strings.TrimSpace(strings.Join(lines, "\n"))
+	if content != "" {
+		content += "\n"
+	}
+	cmd := exec.CommandContext(ctx, "crontab", "-")
+	cmd.Stdin = strings.NewReader(content)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to update crontab: %v %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func filterPanelCronLines(lines []string) []string {
+	filtered := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if strings.Contains(line, panelCronMarker) {
+			continue
+		}
+		filtered = append(filtered, line)
+	}
+	return filtered
+}
+
+func disableLegacyPanelAutostart(ctx context.Context) {
+	if unitName := detectPanelServiceUnit(); unitName != "" {
+		exec.CommandContext(ctx, "systemctl", "disable", unitName).Run()
+	}
+	if serviceName := detectPanelOpenRCService(); serviceName != "" {
+		exec.CommandContext(ctx, "rc-update", "del", serviceName, "default").Run()
+	}
+}
+
+func panelExecutablePath() (string, error) {
+	exePath, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve current executable: %w", err)
+	}
+	exePath, err = filepath.EvalSymlinks(exePath)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve executable symlink: %w", err)
+	}
+	if !filepath.IsAbs(exePath) {
+		return "", fmt.Errorf("current executable path is not absolute: %s", exePath)
+	}
+	if info, err := os.Stat(exePath); err != nil || info.IsDir() {
+		if err != nil {
+			return "", fmt.Errorf("current executable is not accessible: %w", err)
+		}
+		return "", fmt.Errorf("current executable path is a directory: %s", exePath)
+	}
+	return exePath, nil
+}
 
 func hasSystemd() bool {
 	if _, err := os.Stat("/run/systemd/system"); err == nil {

@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -59,8 +61,8 @@ func (c *Collector) CollectSystem() (*MetricSnapshot, error) {
 		snap.SwapUsed = swap.Used
 	}
 
-	// Disk usage (root partition)
-	diskUsage, err := disk.Usage("/")
+	// Disk usage for the filesystem that contains the panel binary.
+	diskUsage, err := disk.Usage(panelBinaryDir())
 	if err == nil && diskUsage != nil {
 		snap.DiskTotal = diskUsage.Total
 		snap.DiskUsed = diskUsage.Used
@@ -84,6 +86,21 @@ func (c *Collector) CollectSystem() (*MetricSnapshot, error) {
 	}
 
 	return snap, nil
+}
+
+func panelBinaryDir() string {
+	exePath, err := os.Executable()
+	if err != nil {
+		return "/"
+	}
+	if resolved, err := filepath.EvalSymlinks(exePath); err == nil {
+		exePath = resolved
+	}
+	dir := filepath.Dir(exePath)
+	if dir == "" || dir == "." {
+		return "/"
+	}
+	return dir
 }
 
 // dockerStatsEntry represents one entry from `docker stats --no-stream --format json`.

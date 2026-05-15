@@ -406,7 +406,7 @@ func RegisterBuiltinTools(r *ToolRegistry) {
 
 	r.Register(&Tool{
 		Name:        "run_command",
-		Description: "Execute a shell command on the server. Use for diagnostics like 'df -h', 'free -m', 'ps aux', 'netstat -tlnp', etc. Dangerous commands are blocked.",
+		Description: "Execute a shell command on the server. Use for diagnostics like 'df -h', 'free -m', 'cat /proc/loadavg', 'cat /proc/net/tcp', etc. Dangerous commands are blocked.",
 		Parameters: jsonSchema(map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{

@@ -22,6 +22,7 @@ import (
 	"github.com/pdai/pdai/internal/model"
 	"github.com/pdai/pdai/internal/service"
 	"github.com/robfig/cron/v3"
+	"github.com/shirou/gopsutil/v4/disk"
 	"gorm.io/gorm"
 )
 
@@ -477,22 +478,31 @@ func (a *CoreAPIImpl) GetMetrics() (map[string]interface{}, error) {
 		}
 	}
 
-	// Disk via df
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if out, err := exec.CommandContext(ctx, "df", "-B1", "/").Output(); err == nil {
-		lines := strings.Split(string(out), "\n")
-		if len(lines) >= 2 {
-			fields := strings.Fields(lines[1])
-			if len(fields) >= 4 {
-				result["disk_total"] = fields[1]
-				result["disk_used"] = fields[2]
-				result["disk_available"] = fields[3]
-			}
-		}
+	// Disk usage for the filesystem that contains the panel binary.
+	diskPath := panelBinaryDir()
+	if usage, err := disk.Usage(diskPath); err == nil && usage != nil {
+		result["disk_path"] = diskPath
+		result["disk_total"] = strconv.FormatUint(usage.Total, 10)
+		result["disk_used"] = strconv.FormatUint(usage.Used, 10)
+		result["disk_available"] = strconv.FormatUint(usage.Free, 10)
 	}
 
 	return result, nil
+}
+
+func panelBinaryDir() string {
+	exePath, err := os.Executable()
+	if err != nil {
+		return "/"
+	}
+	if resolved, err := filepath.EvalSymlinks(exePath); err == nil {
+		exePath = resolved
+	}
+	dir := filepath.Dir(exePath)
+	if dir == "" || dir == "." {
+		return "/"
+	}
+	return dir
 }
 
 func (a *CoreAPIImpl) RunCommand(cmd string, timeoutSec int) (string, error) {
