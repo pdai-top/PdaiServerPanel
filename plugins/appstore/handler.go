@@ -32,7 +32,7 @@ func NewHandler(svc *Service, tplSvc *TemplateService) *Handler {
 func (h *Handler) ListApps(c *gin.Context) {
 	category := c.Query("category")
 	search := c.Query("search")
-	lang := c.Query("lang")
+	lang := normalizeLang(c.Query("lang"))
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "24"))
 
@@ -66,7 +66,7 @@ func (h *Handler) GetApp(c *gin.Context) {
 		return
 	}
 
-	lang := c.Query("lang")
+	lang := normalizeLang(c.Query("lang"))
 
 	// Apply i18n translations
 	applyI18n(app, lang)
@@ -556,6 +556,17 @@ func applyFormFieldsI18n(fieldsJSON, i18nJSON, lang string) string {
 }
 
 // ── Helpers ──
+
+func normalizeLang(lang string) string {
+	lang = strings.TrimSpace(strings.ToLower(lang))
+	if lang == "" {
+		return ""
+	}
+	if strings.HasPrefix(lang, "zh") {
+		return "zh"
+	}
+	return lang
+}
 
 func parseID(c *gin.Context) (uint, error) {
 	idStr := c.Param("id")

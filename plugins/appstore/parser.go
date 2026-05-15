@@ -242,6 +242,9 @@ func ParseTemplateRepo(repoPath string) ([]*TemplateConfig, []string, error) {
 			warnings = append(warnings, fmt.Sprintf("skip %s: missing git_url", name))
 			continue
 		}
+		if data, err := os.ReadFile(filepath.Join(repoPath, name, "metadata", "description.zh.md")); err == nil {
+			tpl.DescriptionZh = string(data)
+		}
 		templates = append(templates, &tpl)
 	}
 
@@ -250,12 +253,13 @@ func ParseTemplateRepo(repoPath string) ([]*TemplateConfig, []string, error) {
 
 // TemplateConfig represents the parsed template.json for a project template.
 type TemplateConfig struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	Description string   `json:"description"`
-	Framework   string   `json:"framework"`
-	GitURL      string   `json:"git_url"`
-	Branch      string   `json:"branch"`
-	Tags        []string `json:"tags"`
-	LogoURL     string   `json:"logo_url"`
+	ID            string   `json:"id"`
+	Name          string   `json:"name"`
+	Description   string   `json:"description"`
+	DescriptionZh string   `json:"description_zh,omitempty"`
+	Framework     string   `json:"framework"`
+	GitURL        string   `json:"git_url"`
+	Branch        string   `json:"branch"`
+	Tags          []string `json:"tags"`
+	LogoURL       string   `json:"logo_url"`
 }

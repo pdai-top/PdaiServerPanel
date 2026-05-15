@@ -117,7 +117,7 @@ func (p *Plugin) FrontendManifest() pluginpkg.FrontendManifest {
 		Routes: []pluginpkg.FrontendRoute{
 			{Path: "/store", Component: "AppStore", Menu: true, Icon: "Store", Label: "App Store", LabelZh: "应用商店"},
 			{Path: "/store/app/:id", Component: "AppDetail", Label: "App Detail", LabelZh: "应用详情"},
-			{Path: "/store/templates", Component: "TemplateMarket", Menu: true, Icon: "LayoutTemplate", Label: "Templates", LabelZh: "项目模板"},
+			{Path: "/store/templates", Component: "TemplateMarket", Menu: false, Icon: "LayoutTemplate", Label: "Templates", LabelZh: "项目模板"},
 		},
 		MenuGroup: "deploy",
 		MenuOrder: 5,

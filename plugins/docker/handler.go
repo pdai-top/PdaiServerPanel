@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -385,6 +386,29 @@ func (h *Handler) ListImages(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
+	}
+	containers, err := h.client.ListContainers(ctx, true)
+	if err == nil {
+		used := make(map[string][]string)
+		for _, ctr := range containers {
+			imageID := strings.TrimSpace(ctr.ImageID)
+			if imageID == "" {
+				continue
+			}
+			used[imageID] = append(used[imageID], ctr.Name)
+			if strings.HasPrefix(imageID, "sha256:") && len(imageID) >= 19 {
+				used[imageID[7:19]] = append(used[imageID[7:19]], ctr.Name)
+			}
+		}
+		for i := range images {
+			if names := used[images[i].ImageID]; len(names) > 0 {
+				images[i].Used = true
+				images[i].UsedBy = names
+			} else if names := used[images[i].ID]; len(names) > 0 {
+				images[i].Used = true
+				images[i].UsedBy = names
+			}
+		}
 	}
 	c.JSON(http.StatusOK, gin.H{"images": images})
 }

@@ -147,6 +147,7 @@ export const logAPI = {
     files: () => api.get('/logs/files'),
     downloadUrl: (type) => `/api/logs/download?type=${type}`,
     system: (params) => api.get('/logs/system', { params }),
+    access: (params) => api.get('/logs/access', { params }),
 }
 
 // ============ Config ============
@@ -175,6 +176,31 @@ export const pluginAPI = {
     frontendManifests: () => api.get('/plugins/frontend-manifests'),
     setSidebarVisible: (id, visible) => api.post(`/plugins/${id}/sidebar`, { visible }),
     install: (id) => api.post(`/plugins/${id}/install`),
+}
+
+// ============ App Store (plugin) ============
+export const appstoreAPI = {
+    listApps: (params) => api.get('/plugins/appstore/apps', { params }),
+    getApp: (id, params) => api.get(`/plugins/appstore/apps/${id}`, { params }),
+    appLogoUrl: (id) => `/api/plugins/appstore/apps/${id}/logo`,
+    listCategories: () => api.get('/plugins/appstore/categories'),
+    listSources: () => api.get('/plugins/appstore/sources'),
+    addSource: (data) => api.post('/plugins/appstore/sources', data),
+    syncSource: (id) => api.post(`/plugins/appstore/sources/${id}/sync`),
+    syncSourceStreamUrl: (id) => `/api/plugins/appstore/sources/${id}/sync/stream`,
+    removeSource: (id) => api.delete(`/plugins/appstore/sources/${id}`),
+    listInstalled: () => api.get('/plugins/appstore/installed'),
+    getInstalled: (id) => api.get(`/plugins/appstore/installed/${id}`),
+    install: (data) => api.post('/plugins/appstore/install', data),
+    updateDomain: (id, domain) => api.put(`/plugins/appstore/installed/${id}/domain`, { domain }),
+    startApp: (id) => api.post(`/plugins/appstore/installed/${id}/start`),
+    stopApp: (id) => api.post(`/plugins/appstore/installed/${id}/stop`),
+    updateApp: (id) => api.post(`/plugins/appstore/installed/${id}/update`),
+    uninstall: (id, removeData = false) => api.delete(`/plugins/appstore/installed/${id}`, { params: { remove_data: removeData } }),
+    checkUpdates: () => api.get('/plugins/appstore/updates'),
+    listTemplates: (params) => api.get('/plugins/appstore/templates', { params }),
+    getTemplate: (id) => api.get(`/plugins/appstore/templates/${id}`),
+    deployTemplate: (data) => api.post('/plugins/appstore/templates/deploy', data),
 }
 
 // ============ Certificates ============

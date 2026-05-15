@@ -64,14 +64,16 @@ func (h *SettingHandler) Update(c *gin.Context) {
 
 	// Only allow known settings
 	allowed := map[string]bool{
-		"auto_reload":           true,
-		"site_name":             true,
-		"server_ipv4":           true,
-		"server_ipv6":           true,
-		"wildcard_domain":       true, // PB-R2-H2: required by Preview Deploy (v0.14+)
-		"max_concurrent_builds": true, // v0.17-A1: panel-wide build concurrency cap
-		"panel_autostart":       true,
-		"startup_script":        true,
+		"auto_reload":               true,
+		"site_name":                 true,
+		"server_ipv4":               true,
+		"server_ipv6":               true,
+		"wildcard_domain":           true, // PB-R2-H2: required by Preview Deploy (v0.14+)
+		"max_concurrent_builds":     true, // v0.17-A1: panel-wide build concurrency cap
+		"panel_autostart":           true,
+		"startup_script":            true,
+		"security_entrance_enabled": true,
+		"security_entrance_path":    true,
 	}
 	if !allowed[req.Key] {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "unknown setting: " + req.Key})
@@ -126,6 +128,17 @@ func (h *SettingHandler) Update(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "startup_script is too long"})
 			return
 		}
+	case "security_entrance_enabled":
+		if value != "true" && value != "false" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "security_entrance_enabled must be 'true' or 'false'"})
+			return
+		}
+	case "security_entrance_path":
+		value = normalizeSecurityEntrancePath(value)
+		if value == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "security_entrance_path is required when security entrance is enabled"})
+			return
+		}
 	}
 
 	if err := h.db.Where("key = ?", req.Key).Assign(model.Setting{Value: value}).FirstOrCreate(&model.Setting{Key: req.Key}).Error; err != nil {
@@ -156,6 +169,39 @@ func (h *SettingHandler) Update(c *gin.Context) {
 // each label `a-z0-9` with optional `-` (not at edges) AND 鈮?3 chars
 // per RFC 1035, total 鈮?53. PB-R3-L2 fix.
 var wildcardDomainRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$`)
+var securityEntrancePathRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{5,63}$`)
+
+func normalizeSecurityEntrancePath(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.Trim(value, "/")
+	if !securityEntrancePathRE.MatchString(value) {
+		return ""
+	}
+	reserved := map[string]bool{
+		"api":         true,
+		"assets":      true,
+		"login":       true,
+		"settings":    true,
+		"hosts":       true,
+		"docker":      true,
+		"files":       true,
+		"terminal":    true,
+		"database":    true,
+		"monitoring":  true,
+		"firewall":    true,
+		"cronjob":     true,
+		"supervisor":  true,
+		"plugins":     true,
+		"logs":        true,
+		"dns":         true,
+		"editor":      true,
+		"favicon.ico": true,
+	}
+	if reserved[strings.ToLower(value)] {
+		return ""
+	}
+	return value
+}
 
 const panelCronMarker = "# Pdai panel autostart"
 

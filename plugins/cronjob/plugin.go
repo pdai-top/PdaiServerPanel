@@ -2,8 +2,10 @@ package cronjob
 
 import (
 	"fmt"
+	"path/filepath"
 
 	pluginpkg "github.com/pdai/pdai/internal/plugin"
+	databaseplugin "github.com/pdai/pdai/plugins/database"
 )
 
 // Plugin implements the plugin.Plugin interface for cron job management.
@@ -20,14 +22,15 @@ func New() *Plugin {
 // Metadata returns the plugin metadata.
 func (p *Plugin) Metadata() pluginpkg.Metadata {
 	return pluginpkg.Metadata{
-		ID:          "cronjob",
-		Name:        "Cron Jobs",
-		Version:     "1.0.0",
-		Description: "General-purpose scheduled task management with shell command execution",
-		Author:      "Pdai",
-		Priority:    50,
-		Icon:        "Clock",
-		Category:    "management",
+		ID:           "cronjob",
+		Name:         "Cron Jobs",
+		Version:      "1.0.0",
+		Description:  "General-purpose scheduled task management with shell command execution",
+		Author:       "Pdai",
+		Dependencies: []string{"database"},
+		Priority:     50,
+		Icon:         "Clock",
+		Category:     "management",
 	}
 }
 
@@ -37,7 +40,9 @@ func (p *Plugin) Init(ctx *pluginpkg.Context) error {
 		return fmt.Errorf("migrate: %w", err)
 	}
 
-	p.svc = NewService(ctx.DB, ctx.Logger, ctx.EventBus)
+	databaseDataDir := filepath.Join(filepath.Dir(ctx.DataDir), "database")
+	databaseSvc := databaseplugin.NewService(ctx.DB, databaseDataDir, ctx.Logger.With("plugin", "database"))
+	p.svc = NewService(ctx.DB, ctx.Logger, ctx.EventBus, databaseSvc)
 	p.handler = NewHandler(p.svc)
 
 	r := ctx.Router      // JWT required

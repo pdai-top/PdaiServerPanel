@@ -3,6 +3,7 @@ package cronjob
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os/exec"
@@ -11,17 +12,24 @@ import (
 
 	"github.com/pdai/pdai/internal/execx"
 	pluginpkg "github.com/pdai/pdai/internal/plugin"
+	databaseplugin "github.com/pdai/pdai/plugins/database"
 	"github.com/robfig/cron/v3"
 	"gorm.io/gorm"
 )
 
 const maxOutputBytes = 64 * 1024 // 64KB
 
+const (
+	taskTypeShell          = "shell"
+	taskTypeDatabaseBackup = "database_backup"
+)
+
 // Service manages cron job lifecycle, scheduling, and execution.
 type Service struct {
 	db         *gorm.DB
 	logger     *slog.Logger
 	eventBus   *pluginpkg.EventBus
+	database   *databaseplugin.Service
 	runner     *cron.Cron
 	mu         sync.Mutex
 	entries    map[uint]cron.EntryID // taskID → cron entryID
@@ -34,11 +42,12 @@ type Service struct {
 }
 
 // NewService creates a new cron job service.
-func NewService(db *gorm.DB, logger *slog.Logger, eventBus *pluginpkg.EventBus) *Service {
+func NewService(db *gorm.DB, logger *slog.Logger, eventBus *pluginpkg.EventBus, databaseSvc *databaseplugin.Service) *Service {
 	return &Service{
 		db:       db,
 		logger:   logger,
 		eventBus: eventBus,
+		database: databaseSvc,
 		runner:   cron.New(),
 		entries:  make(map[uint]cron.EntryID),
 		running:  make(map[uint]bool),
@@ -208,7 +217,9 @@ func (s *Service) CreateTask(req *CreateTaskRequest) (*CronTask, error) {
 	task := CronTask{
 		Name:            req.Name,
 		Expression:      req.Expression,
+		Type:            normalizeTaskType(req.Type),
 		Command:         req.Command,
+		Payload:         req.Payload,
 		WorkingDir:      req.WorkingDir,
 		Enabled:         true,
 		TimeoutSec:      req.TimeoutSec,
@@ -231,6 +242,9 @@ func (s *Service) CreateTask(req *CreateTaskRequest) (*CronTask, error) {
 		task.MaxRetries = 10
 	}
 	task.SetTags(req.Tags)
+	if err := s.normalizeTaskConfig(&task); err != nil {
+		return nil, err
+	}
 
 	if err := s.db.Create(&task).Error; err != nil {
 		return nil, fmt.Errorf("create task: %w", err)
@@ -261,8 +275,14 @@ func (s *Service) UpdateTask(id uint, req *UpdateTaskRequest) (*CronTask, error)
 	if req.Name != nil {
 		task.Name = *req.Name
 	}
+	if req.Type != nil {
+		task.Type = normalizeTaskType(*req.Type)
+	}
 	if req.Command != nil {
 		task.Command = *req.Command
+	}
+	if req.Payload != nil {
+		task.Payload = *req.Payload
 	}
 	if req.WorkingDir != nil {
 		task.WorkingDir = *req.WorkingDir
@@ -293,6 +313,9 @@ func (s *Service) UpdateTask(id uint, req *UpdateTaskRequest) (*CronTask, error)
 	}
 	if req.NotifyOnFailure != nil {
 		task.NotifyOnFailure = *req.NotifyOnFailure
+	}
+	if err := s.normalizeTaskConfig(task); err != nil {
+		return nil, err
 	}
 
 	if err := s.db.Save(task).Error; err != nil {
@@ -462,22 +485,8 @@ func (s *Service) runCommand(task CronTask) (*CronLog, error) {
 		}
 
 		ctx, cancel := context.WithTimeout(s.taskCtx, timeout)
-		// execx.BashContext enforces the timeout across the full pipeline
-		// tree — `exec.CommandContext` alone lets `foo | bar` children
-		// survive the outer bash getting SIGKILL'd, so a runaway cron task
-		// could outlive its timeout budget.
-		cmd := execx.BashContext(ctx, task.Command)
-		if task.WorkingDir != "" {
-			cmd.Dir = task.WorkingDir
-		}
-
-		// Use a bounded buffer to prevent OOM on large outputs.
-		output := &boundedBuffer{max: maxOutputBytes}
-		cmd.Stdout = output
-		cmd.Stderr = output
-
 		startedAt := time.Now()
-		err := cmd.Run()
+		outStr, err := s.runTaskAction(ctx, task)
 		finishedAt := time.Now()
 		cancel()
 
@@ -494,8 +503,6 @@ func (s *Service) runCommand(task CronTask) (*CronLog, error) {
 				exitCode = -1
 			}
 		}
-
-		outStr := output.String()
 
 		lastLog = &CronLog{
 			TaskID:     task.ID,
@@ -559,6 +566,82 @@ func (s *Service) runCommand(task CronTask) (*CronLog, error) {
 	}
 
 	return lastLog, nil
+}
+
+func (s *Service) runTaskAction(ctx context.Context, task CronTask) (string, error) {
+	switch normalizeTaskType(task.Type) {
+	case taskTypeDatabaseBackup:
+		return s.runDatabaseBackupTask(task)
+	default:
+		return s.runShellTask(ctx, task)
+	}
+}
+
+func (s *Service) runShellTask(ctx context.Context, task CronTask) (string, error) {
+	// execx.BashContext enforces the timeout across the full pipeline
+	// tree, so a runaway cron task cannot outlive its timeout budget.
+	cmd := execx.BashContext(ctx, task.Command)
+	if task.WorkingDir != "" {
+		cmd.Dir = task.WorkingDir
+	}
+	output := &boundedBuffer{max: maxOutputBytes}
+	cmd.Stdout = output
+	cmd.Stderr = output
+	err := cmd.Run()
+	return output.String(), err
+}
+
+func (s *Service) runDatabaseBackupTask(task CronTask) (string, error) {
+	if s.database == nil {
+		return "", fmt.Errorf("database backup service is unavailable")
+	}
+	var payload databaseBackupPayload
+	if err := json.Unmarshal([]byte(task.Payload), &payload); err != nil {
+		return "", fmt.Errorf("invalid database backup config: %w", err)
+	}
+	if payload.InstanceID == 0 {
+		return "", fmt.Errorf("database instance is required")
+	}
+	backup, err := s.database.CreateBackup(payload.InstanceID)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("database backup completed\ninstance: %s\nfile: %s\nsize: %d bytes", backup.InstanceName, backup.FileName, backup.SizeBytes), nil
+}
+
+func normalizeTaskType(taskType string) string {
+	switch taskType {
+	case taskTypeDatabaseBackup:
+		return taskTypeDatabaseBackup
+	default:
+		return taskTypeShell
+	}
+}
+
+type databaseBackupPayload struct {
+	InstanceID uint `json:"instance_id"`
+}
+
+func (s *Service) normalizeTaskConfig(task *CronTask) error {
+	task.Type = normalizeTaskType(task.Type)
+	switch task.Type {
+	case taskTypeDatabaseBackup:
+		var payload databaseBackupPayload
+		if err := json.Unmarshal([]byte(task.Payload), &payload); err != nil {
+			return fmt.Errorf("invalid database backup config: %w", err)
+		}
+		if payload.InstanceID == 0 {
+			return fmt.Errorf("database instance is required")
+		}
+		task.Command = fmt.Sprintf("database backup instance #%d", payload.InstanceID)
+		task.WorkingDir = ""
+	default:
+		task.Type = taskTypeShell
+		if task.Command == "" {
+			return fmt.Errorf("command is required")
+		}
+	}
+	return nil
 }
 
 // boundedBuffer is a writer that keeps only the last `max` bytes.

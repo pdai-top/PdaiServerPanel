@@ -10,7 +10,9 @@ type CronTask struct {
 	ID              uint       `gorm:"primaryKey" json:"id"`
 	Name            string     `gorm:"size:128;not null" json:"name"`
 	Expression      string     `gorm:"size:128;not null" json:"expression"` // standard 5-field cron
+	Type            string     `gorm:"size:32;default:shell" json:"type"`   // shell/database_backup
 	Command         string     `gorm:"type:text;not null" json:"command"`
+	Payload         string     `gorm:"type:text" json:"payload"` // JSON config for non-shell tasks
 	WorkingDir      string     `gorm:"size:512" json:"working_dir"`
 	Enabled         bool       `gorm:"default:true" json:"enabled"`
 	Tags            string     `gorm:"type:text" json:"tags"` // JSON array: ["backup","cleanup"]
@@ -65,7 +67,9 @@ func (CronLog) TableName() string { return "plugin_cronjob_logs" }
 type CreateTaskRequest struct {
 	Name            string   `json:"name" binding:"required"`
 	Expression      string   `json:"expression" binding:"required"`
-	Command         string   `json:"command" binding:"required"`
+	Type            string   `json:"type"`
+	Command         string   `json:"command"`
+	Payload         string   `json:"payload"`
 	WorkingDir      string   `json:"working_dir"`
 	Enabled         *bool    `json:"enabled"`
 	Tags            []string `json:"tags"`
@@ -78,7 +82,9 @@ type CreateTaskRequest struct {
 type UpdateTaskRequest struct {
 	Name            *string  `json:"name"`
 	Expression      *string  `json:"expression"`
+	Type            *string  `json:"type"`
 	Command         *string  `json:"command"`
+	Payload         *string  `json:"payload"`
 	WorkingDir      *string  `json:"working_dir"`
 	Enabled         *bool    `json:"enabled"`
 	Tags            []string `json:"tags"`

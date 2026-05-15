@@ -1,14 +1,15 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import {
     Box, Flex, Text, Card, Badge, Button, Table, Dialog, TextField,
     Switch, TextArea, Heading, Callout, ScrollArea, Tabs,
+    Select,
 } from '@radix-ui/themes'
 import {
-    Clock, Play, Plus, Pencil, Trash2,
+    Clock, Play, Plus,
     Timer, RotateCcw, ChevronDown, ChevronUp,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import { cronjobAPI } from '../api/index.js'
+import { cronjobAPI, databaseAPI } from '../api/index.js'
 
 function statusBadge(status, t) {
     const statusMap = {
@@ -37,24 +38,28 @@ function formatDuration(ms) {
 }
 
 const defaultForm = {
-    name: '', expression: '', command: '', working_dir: '',
-    tags: '', timeout_sec: 300, max_retries: 0, notify_on_failure: false, enabled: true,
+    name: '', expression: '', type: 'shell', command: '', working_dir: '', database_instance_id: '',
+    timeout_sec: 300, max_retries: 0, notify_on_failure: false, enabled: true,
 }
 
 export default function CronJobManager() {
     const { t } = useTranslation()
     const [tasks, setTasks] = useState([])
     const [logs, setLogs] = useState([])
+    const [databaseInstances, setDatabaseInstances] = useState([])
     const [loading, setLoading] = useState(true)
     const [dialogOpen, setDialogOpen] = useState(false)
     const [editId, setEditId] = useState(null)
     const [form, setForm] = useState({ ...defaultForm })
     const [saving, setSaving] = useState(false)
     const [triggerConfirm, setTriggerConfirm] = useState(null)
-    const [deleteConfirm, setDeleteConfirm] = useState(null)
     const [expandedLog, setExpandedLog] = useState(null)
     const [activeTab, setActiveTab] = useState('tasks')
     const [logTaskId, setLogTaskId] = useState(null)
+    const selectedLogTask = useMemo(
+        () => tasks.find(task => task.id === logTaskId),
+        [tasks, logTaskId]
+    )
 
     const fetchTasks = useCallback(async () => {
         try {
@@ -72,30 +77,49 @@ export default function CronJobManager() {
         } catch { /* ignore */ }
     }, [])
 
+    const fetchDatabaseInstances = useCallback(async () => {
+        try {
+            const res = await databaseAPI.listInstances()
+            const instances = Array.isArray(res.data) ? res.data : (res.data?.instances || [])
+            setDatabaseInstances(instances.filter(inst => String(inst.engine || '').toLowerCase() !== 'redis'))
+        } catch {
+            setDatabaseInstances([])
+        }
+    }, [])
+
     const fetchAll = useCallback(async () => {
         setLoading(true)
         await fetchTasks()
         await fetchLogs(logTaskId)
+        await fetchDatabaseInstances()
         setLoading(false)
-    }, [fetchTasks, fetchLogs, logTaskId])
+    }, [fetchTasks, fetchLogs, fetchDatabaseInstances, logTaskId])
 
     useEffect(() => { fetchAll() }, [fetchAll])
 
     const openCreate = () => {
         setEditId(null)
         setForm({ ...defaultForm })
+        fetchDatabaseInstances()
         setDialogOpen(true)
     }
 
     const openEdit = (task) => {
         setEditId(task.id)
-        const tags = task.tags ? (typeof task.tags === 'string' ? (() => { try { return JSON.parse(task.tags).join(', ') } catch { return task.tags } })() : (Array.isArray(task.tags) ? task.tags.join(', ') : '')) : ''
+        fetchDatabaseInstances()
+        let databaseInstanceId = ''
+        if (task.type === 'database_backup' && task.payload) {
+            try {
+                databaseInstanceId = String(JSON.parse(task.payload).instance_id || '')
+            } catch { /* ignore */ }
+        }
         setForm({
             name: task.name || '',
             expression: task.expression || '',
+            type: task.type || 'shell',
             command: task.command || '',
             working_dir: task.working_dir || '',
-            tags,
+            database_instance_id: databaseInstanceId,
             timeout_sec: task.timeout_sec || 300,
             max_retries: task.max_retries || 0,
             notify_on_failure: !!task.notify_on_failure,
@@ -107,8 +131,20 @@ export default function CronJobManager() {
     const handleSave = async () => {
         setSaving(true)
         try {
-            const tags = form.tags ? form.tags.split(',').map(s => s.trim()).filter(Boolean) : []
-            const data = { ...form, tags, timeout_sec: Number(form.timeout_sec) || 300, max_retries: Number(form.max_retries) || 0 }
+            const data = {
+                ...form,
+                tags: [],
+                timeout_sec: Number(form.timeout_sec) || 300,
+                max_retries: Number(form.max_retries) || 0,
+            }
+            if (form.type === 'database_backup') {
+                data.command = ''
+                data.working_dir = ''
+                data.payload = JSON.stringify({ instance_id: Number(form.database_instance_id) || 0 })
+            } else {
+                data.payload = ''
+            }
+            delete data.database_instance_id
             if (editId) {
                 await cronjobAPI.updateTask(editId, data)
             } else {
@@ -120,23 +156,6 @@ export default function CronJobManager() {
             alert(e?.response?.data?.error || e.message)
         } finally {
             setSaving(false)
-        }
-    }
-
-    const handleToggle = async (task) => {
-        try {
-            await cronjobAPI.updateTask(task.id, { enabled: !task.enabled })
-            fetchTasks()
-        } catch { /* ignore */ }
-    }
-
-    const handleDelete = async (id) => {
-        try {
-            await cronjobAPI.deleteTask(id)
-            setDeleteConfirm(null)
-            fetchAll()
-        } catch (e) {
-            alert(e?.response?.data?.error || e.message)
         }
     }
 
@@ -152,9 +171,25 @@ export default function CronJobManager() {
 
     const viewTaskLogs = (taskId) => {
         setLogTaskId(taskId)
+        setExpandedLog(null)
         setActiveTab('logs')
-        // fetchAll will be triggered by logTaskId change via useEffect
+        fetchLogs(taskId)
     }
+
+    const viewAllLogs = () => {
+        setLogTaskId(null)
+        setExpandedLog(null)
+        fetchLogs(null)
+    }
+
+    const taskTypeLabel = (type) => {
+        if (type === 'database_backup') return t('cronjob.type_database_backup')
+        return t('cronjob.type_shell')
+    }
+
+    const canSave = form.name && form.expression && (
+        form.type === 'database_backup' ? form.database_instance_id : form.command
+    )
 
     return (
         <Box p="4" style={{ maxWidth: 1200, margin: '0 auto' }}>
@@ -187,48 +222,54 @@ export default function CronJobManager() {
                                     <Table.Row>
                                         <Table.ColumnHeaderCell>{t('cronjob.task_name')}</Table.ColumnHeaderCell>
                                         <Table.ColumnHeaderCell>{t('cronjob.expression')}</Table.ColumnHeaderCell>
-                                        <Table.ColumnHeaderCell>{t('cronjob.tags')}</Table.ColumnHeaderCell>
                                         <Table.ColumnHeaderCell>{t('cronjob.next_run')}</Table.ColumnHeaderCell>
                                         <Table.ColumnHeaderCell>{t('cronjob.last_status')}</Table.ColumnHeaderCell>
-                                        <Table.ColumnHeaderCell>{t('cronjob.enabled')}</Table.ColumnHeaderCell>
                                         <Table.ColumnHeaderCell>{t('cronjob.actions')}</Table.ColumnHeaderCell>
                                     </Table.Row>
                                 </Table.Header>
                                 <Table.Body>
                                     {tasks.map(task => {
-                                        let tagList = []
-                                        try { tagList = typeof task.tags === 'string' ? JSON.parse(task.tags || '[]') : (task.tags || []) } catch {}
                                         return (
-                                            <Table.Row key={task.id}>
+                                            <Table.Row
+                                                key={task.id}
+                                                onClick={() => openEdit(task)}
+                                                onKeyDown={(e) => {
+                                                    if (e.key === 'Enter' || e.key === ' ') {
+                                                        e.preventDefault()
+                                                        openEdit(task)
+                                                    }
+                                                }}
+                                                tabIndex={0}
+                                                style={{ cursor: 'pointer' }}
+                                            >
                                                 <Table.Cell>
-                                                    <Text weight="medium">{task.name}</Text>
+                                                    <Flex align="center" gap="2" wrap="wrap">
+                                                        <Text weight="medium">{task.name}</Text>
+                                                        <Badge size="1" variant="soft" color={task.type === 'database_backup' ? 'blue' : 'gray'} style={{ width: 'fit-content' }}>
+                                                            {taskTypeLabel(task.type)}
+                                                        </Badge>
+                                                    </Flex>
                                                 </Table.Cell>
                                                 <Table.Cell>
                                                     <code style={{ fontSize: 12 }}>{task.expression}</code>
                                                 </Table.Cell>
                                                 <Table.Cell>
-                                                    <Flex gap="1" wrap="wrap">
-                                                        {tagList.map(tag => <Badge key={tag} variant="outline" size="1">{tag}</Badge>)}
-                                                    </Flex>
-                                                </Table.Cell>
-                                                <Table.Cell>
                                                     <Text size="1" color="gray">{formatDate(task.next_run_at)}</Text>
                                                 </Table.Cell>
                                                 <Table.Cell>
-                                                    <Flex direction="column" gap="1">
+                                                    <Flex align="center" gap="2" wrap="wrap">
                                                         {statusBadge(task.last_status, t)}
                                                         <Text size="1" color="gray">{formatDate(task.last_run_at)}</Text>
                                                     </Flex>
                                                 </Table.Cell>
                                                 <Table.Cell>
-                                                    <Switch checked={task.enabled} onCheckedChange={() => handleToggle(task)} />
-                                                </Table.Cell>
-                                                <Table.Cell>
-                                                    <Flex gap="1">
-                                                        <Button size="1" variant="ghost" onClick={() => openEdit(task)} title={t('cronjob.edit_task')}><Pencil size={14} /></Button>
-                                                        <Button size="1" variant="ghost" color="green" onClick={() => setTriggerConfirm(task.id)} title={t('cronjob.trigger')}><Play size={14} /></Button>
-                                                        <Button size="1" variant="ghost" onClick={() => viewTaskLogs(task.id)} title={t('cronjob.logs')}><Timer size={14} /></Button>
-                                                        <Button size="1" variant="ghost" color="red" onClick={() => setDeleteConfirm(task.id)} title={t('common.delete')}><Trash2 size={14} /></Button>
+                                                    <Flex gap="1" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
+                                                        <Button size="1" variant="soft" color="green" onClick={() => setTriggerConfirm(task.id)}>
+                                                            <Play size={14} /> {t('cronjob.action_start')}
+                                                        </Button>
+                                                        <Button size="1" variant="soft" onClick={() => viewTaskLogs(task.id)}>
+                                                            <Timer size={14} /> {t('cronjob.action_diary')}
+                                                        </Button>
                                                     </Flex>
                                                 </Table.Cell>
                                             </Table.Row>
@@ -243,11 +284,24 @@ export default function CronJobManager() {
                 <Tabs.Content value="logs">
                     <Card mt="3">
                         <Flex justify="between" align="center" mb="3">
-                            <Text weight="medium">
-                                {logTaskId ? t('cronjob.task_logs') : t('cronjob.all_logs')}
-                            </Text>
+                            <Box>
+                                <Text weight="medium">
+                                    {logTaskId
+                                        ? t('cronjob.task_diary_title', {
+                                            name: selectedLogTask?.name || t('cronjob.unknown_task', { id: logTaskId }),
+                                        })
+                                        : t('cronjob.all_logs')}
+                                </Text>
+                                {logTaskId && (
+                                    <Text size="2" color="gray" style={{ display: 'block', marginTop: 2 }}>
+                                        {t('cronjob.task_diary_hint', {
+                                            name: selectedLogTask?.name || t('cronjob.unknown_task', { id: logTaskId }),
+                                        })}
+                                    </Text>
+                                )}
+                            </Box>
                             {logTaskId && (
-                                <Button size="1" variant="soft" onClick={() => { setLogTaskId(null) }}>
+                                <Button size="1" variant="soft" onClick={viewAllLogs}>
                                     {t('cronjob.all_logs')}
                                 </Button>
                             )}
@@ -311,8 +365,29 @@ export default function CronJobManager() {
                     <Flex direction="column" gap="3" mt="3">
                         <label>
                             <Text size="2" weight="medium">{t('cronjob.task_name')}</Text>
-                            <TextField.Root mt="1" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} placeholder="Daily cleanup" />
+                            <TextField.Root mt="1" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} placeholder={t('cronjob.task_name_placeholder')} />
                         </label>
+
+                        <Box>
+                            <Text size="2" weight="medium">{t('cronjob.task_type')}</Text>
+                            <Select.Root
+                                value={form.type}
+                                onValueChange={v => {
+                                    if (v === 'database_backup') fetchDatabaseInstances()
+                                    setForm({
+                                        ...form,
+                                        type: v,
+                                        timeout_sec: v === 'database_backup' && Number(form.timeout_sec) < 1800 ? 1800 : form.timeout_sec,
+                                    })
+                                }}
+                            >
+                                <Select.Trigger mt="1" style={{ width: '100%' }} />
+                                <Select.Content>
+                                    <Select.Item value="shell">{t('cronjob.type_shell')}</Select.Item>
+                                    <Select.Item value="database_backup">{t('cronjob.type_database_backup')}</Select.Item>
+                                </Select.Content>
+                            </Select.Root>
+                        </Box>
 
                         <label>
                             <Text size="2" weight="medium">{t('cronjob.expression')}</Text>
@@ -321,21 +396,47 @@ export default function CronJobManager() {
                             <Text size="1" color="gray" style={{ display: 'block' }}>{t('cronjob.expression_examples')}</Text>
                         </label>
 
-                        <label>
-                            <Text size="2" weight="medium">{t('cronjob.command')}</Text>
-                            <TextArea mt="1" value={form.command} onChange={e => setForm({ ...form, command: e.target.value })} placeholder={t('cronjob.command_placeholder')} rows={3} />
-                        </label>
+                        {form.type === 'database_backup' ? (
+                            <Box>
+                                <Text size="2" weight="medium">{t('cronjob.database_instance')}</Text>
+                                <select
+                                    value={form.database_instance_id}
+                                    onChange={e => setForm({ ...form, database_instance_id: e.target.value })}
+                                    disabled={databaseInstances.length === 0}
+                                    style={{
+                                        width: '100%',
+                                        height: 36,
+                                        marginTop: 4,
+                                        padding: '0 10px',
+                                        borderRadius: 6,
+                                        border: '1px solid var(--gray-7)',
+                                        background: 'var(--color-panel)',
+                                        color: 'var(--gray-12)',
+                                        outline: 'none',
+                                    }}
+                                >
+                                    <option value="">{databaseInstances.length === 0 ? t('cronjob.no_database_instances') : t('cronjob.select_database_instance')}</option>
+                                    {databaseInstances.map(inst => (
+                                        <option key={inst.id} value={String(inst.id)}>
+                                            {inst.name} / {inst.engine} / {inst.source === 'remote' ? t('cronjob.remote_database') : t('cronjob.local_database')}
+                                        </option>
+                                    ))}
+                                </select>
+                                <Text size="1" color="gray">{t('cronjob.database_backup_help')}</Text>
+                            </Box>
+                        ) : (
+                            <>
+                                <label>
+                                    <Text size="2" weight="medium">{t('cronjob.command')}</Text>
+                                    <TextArea mt="1" value={form.command} onChange={e => setForm({ ...form, command: e.target.value })} placeholder={t('cronjob.command_placeholder')} rows={3} />
+                                </label>
 
-                        <label>
-                            <Text size="2" weight="medium">{t('cronjob.working_dir')}</Text>
-                            <TextField.Root mt="1" value={form.working_dir} onChange={e => setForm({ ...form, working_dir: e.target.value })} placeholder={t('cronjob.working_dir_placeholder')} />
-                        </label>
-
-                        <label>
-                            <Text size="2" weight="medium">{t('cronjob.tags')}</Text>
-                            <TextField.Root mt="1" value={form.tags} onChange={e => setForm({ ...form, tags: e.target.value })} placeholder="backup, cleanup" />
-                            <Text size="1" color="gray">{t('cronjob.tags_help')}</Text>
-                        </label>
+                                <label>
+                                    <Text size="2" weight="medium">{t('cronjob.working_dir')}</Text>
+                                    <TextField.Root mt="1" value={form.working_dir} onChange={e => setForm({ ...form, working_dir: e.target.value })} placeholder={t('cronjob.working_dir_placeholder')} />
+                                </label>
+                            </>
+                        )}
 
                         <Flex gap="3">
                             <label style={{ flex: 1 }}>
@@ -364,7 +465,7 @@ export default function CronJobManager() {
                         <Dialog.Close>
                             <Button variant="soft" color="gray">{t('common.cancel')}</Button>
                         </Dialog.Close>
-                        <Button onClick={handleSave} disabled={saving || !form.name || !form.expression || !form.command}>
+                        <Button onClick={handleSave} disabled={saving || !canSave}>
                             {saving ? t('common.loading') : t('common.save')}
                         </Button>
                     </Flex>
@@ -380,20 +481,6 @@ export default function CronJobManager() {
                         <Dialog.Close><Button variant="soft" color="gray">{t('common.cancel')}</Button></Dialog.Close>
                         <Button color="green" onClick={() => handleTrigger(triggerConfirm)}>
                             <Play size={14} /> {t('cronjob.trigger')}
-                        </Button>
-                    </Flex>
-                </Dialog.Content>
-            </Dialog.Root>
-
-            {/* Delete Confirm Dialog */}
-            <Dialog.Root open={deleteConfirm != null} onOpenChange={() => setDeleteConfirm(null)}>
-                <Dialog.Content style={{ maxWidth: 400 }} aria-describedby={undefined}>
-                    <Dialog.Title>{t('common.delete')}</Dialog.Title>
-                    <Text>{t('cronjob.delete_confirm')}</Text>
-                    <Flex gap="3" mt="4" justify="end">
-                        <Dialog.Close><Button variant="soft" color="gray">{t('common.cancel')}</Button></Dialog.Close>
-                        <Button color="red" onClick={() => handleDelete(deleteConfirm)}>
-                            <Trash2 size={14} /> {t('common.delete')}
                         </Button>
                     </Flex>
                 </Dialog.Content>

@@ -9,6 +9,7 @@ import Dashboard from './pages/Dashboard.jsx'
 import HostList from './pages/HostList.jsx'
 import Settings from './pages/Settings.jsx'
 import DockerOverview from './pages/DockerOverview.jsx'
+import DockerImages from './pages/DockerImages.jsx'
 import DockerSettings from './pages/DockerSettings.jsx'
 import FileManager from './pages/FileManager.jsx'
 import FileEditor from './pages/FileEditor.jsx'
@@ -22,6 +23,9 @@ import FirewallManager from './pages/FirewallManager.jsx'
 import CronJobManager from './pages/CronJobManager.jsx'
 import SupervisorManager from './pages/SupervisorManager.jsx'
 import PluginsPage from './pages/PluginsPage.jsx'
+import AppStore from './pages/AppStore.jsx'
+import AppDetail from './pages/AppDetail.jsx'
+import TemplateMarket from './pages/TemplateMarket.jsx'
 
 function ProtectedRoute({ children }) {
     const token = useAuthStore((s) => s.token)
@@ -65,6 +69,7 @@ export default function App() {
                     <Route path="hosts" element={<HostList />} />
                     <Route path="editor" element={<Navigate to="/settings?tab=caddyfile" replace />} />
                     <Route path="docker" element={<DockerOverview />} />
+                    <Route path="docker/images" element={<DockerImages />} />
                     <Route path="docker/settings" element={<DockerSettings />} />
                     <Route path="files" element={<FileManager />} />
                     <Route path="files/edit" element={<FileEditor />} />
@@ -79,11 +84,13 @@ export default function App() {
                     <Route path="cronjob" element={<CronJobManager />} />
                     <Route path="supervisor" element={<SupervisorManager />} />
                     <Route path="plugins" element={<PluginsPage />} />
+                    <Route path="store" element={<AppStore />} />
+                    <Route path="store/app/:id" element={<AppDetail />} />
+                    <Route path="store/templates" element={<TemplateMarket />} />
 
                     <Route path="logs" element={<Navigate to="/settings" replace />} />
                     <Route path="dns" element={<Navigate to="/settings" replace />} />
                     <Route path="docker/containers" element={<Navigate to="/docker" replace />} />
-                    <Route path="docker/images" element={<Navigate to="/docker" replace />} />
                     <Route path="docker/networks" element={<Navigate to="/docker" replace />} />
                     <Route path="docker/volumes" element={<Navigate to="/docker" replace />} />
                 </Route>

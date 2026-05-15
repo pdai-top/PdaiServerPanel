@@ -344,15 +344,16 @@ func (sm *SourceManager) syncTemplates(sourceID uint, repoPath string) error {
 		}
 
 		pt := ProjectTemplate{
-			SourceID:    sourceID,
-			TemplateID:  tpl.ID,
-			Name:        tpl.Name,
-			Description: tpl.Description,
-			Framework:   tpl.Framework,
-			GitURL:      tpl.GitURL,
-			Branch:      branch,
-			Tags:        string(tagsJSON),
-			LogoURL:     tpl.LogoURL,
+			SourceID:      sourceID,
+			TemplateID:    tpl.ID,
+			Name:          tpl.Name,
+			Description:   tpl.Description,
+			DescriptionZh: tpl.DescriptionZh,
+			Framework:     tpl.Framework,
+			GitURL:        tpl.GitURL,
+			Branch:        branch,
+			Tags:          string(tagsJSON),
+			LogoURL:       tpl.LogoURL,
 		}
 
 		var existing ProjectTemplate

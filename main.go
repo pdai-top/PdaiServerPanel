@@ -26,6 +26,7 @@ import (
 	"github.com/pdai/pdai/internal/model"
 	"github.com/pdai/pdai/internal/plugin"
 	"github.com/pdai/pdai/internal/service"
+	appstoreplugin "github.com/pdai/pdai/plugins/appstore"
 	cronjobplugin "github.com/pdai/pdai/plugins/cronjob"
 	dbplugin "github.com/pdai/pdai/plugins/database"
 	dockerplugin "github.com/pdai/pdai/plugins/docker"
@@ -112,6 +113,7 @@ func main() {
 		ExposeHeaders:    []string{"Content-Length", "Content-Disposition"},
 		AllowCredentials: false,
 	}))
+	r.Use(securityEntranceMiddleware(db))
 
 	api := r.Group("/api")
 
@@ -160,10 +162,11 @@ func main() {
 	adminOnly.POST("/caddy/fmt", caddyH.Format)
 	adminOnly.POST("/caddy/validate", caddyH.Validate)
 
-	logH := handler.NewLogHandler(cfg)
+	logH := handler.NewLogHandler(cfg, db)
 	protected.GET("/logs", logH.GetLogs)
 	protected.GET("/logs/files", logH.ListLogFiles)
 	protected.GET("/logs/download", logH.Download)
+	protected.GET("/logs/access", logH.GetAccessLog)
 	protected.GET("/logs/system", logH.GetSystemLog)
 
 	exportH := handler.NewExportHandler(hostSvc)
@@ -187,7 +190,8 @@ func main() {
 
 	pluginRouter := protected.Group("/plugins")
 	adminPluginRouter := adminOnly.Group("/plugins")
-	if err := initPlugins(db, pluginRouter, adminPluginRouter, hostSvc, caddyMgr, cfg); err != nil {
+	publicPluginRouter := api.Group("/plugins")
+	if err := initPlugins(db, pluginRouter, adminPluginRouter, publicPluginRouter, hostSvc, caddyMgr, cfg); err != nil {
 		log.Fatalf("Failed to initialize plugins: %v", err)
 	}
 
@@ -206,13 +210,16 @@ func main() {
 	}
 }
 
-func initPlugins(db *gorm.DB, protectedRouter *gin.RouterGroup, adminRouter *gin.RouterGroup, hostSvc *service.HostService, caddyMgr *caddy.Manager, cfg *config.Config) error {
+func initPlugins(db *gorm.DB, protectedRouter *gin.RouterGroup, adminRouter *gin.RouterGroup, publicRouter *gin.RouterGroup, hostSvc *service.HostService, caddyMgr *caddy.Manager, cfg *config.Config) error {
 	coreAPI := plugin.NewCoreAPI(db, hostSvc, caddyMgr, cfg.DataDir, cfg.JWTSecret)
-	pluginMgr := plugin.NewManager(db, protectedRouter, adminRouter, adminRouter, nil, coreAPI, cfg.DataDir)
+	pluginMgr := plugin.NewManager(db, protectedRouter, adminRouter, adminRouter, publicRouter, coreAPI, cfg.DataDir)
 	coreAPI.SetEventBus(pluginMgr.EventBus())
 
 	if err := pluginMgr.Register(dockerplugin.New()); err != nil {
 		return fmt.Errorf("register docker plugin: %w", err)
+	}
+	if err := pluginMgr.Register(appstoreplugin.New()); err != nil {
+		return fmt.Errorf("register appstore plugin: %w", err)
 	}
 	if err := pluginMgr.Register(fmplugin.New()); err != nil {
 		return fmt.Errorf("register filemanager plugin: %w", err)

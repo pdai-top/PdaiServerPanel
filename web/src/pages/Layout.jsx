@@ -24,6 +24,8 @@ import {
     KeyRound,
     AlertCircle,
     CheckCircle2,
+    Store,
+    LayoutTemplate,
 } from 'lucide-react'
 import { useAuthStore } from '../stores/auth.js'
 import { useThemeStore } from '../stores/theme.js'
@@ -46,6 +48,8 @@ const pluginIcons = {
     CalendarClock,
     SquareTerminal,
     ServerCog,
+    Store,
+    LayoutTemplate,
 }
 
 const bottomNavItems = [

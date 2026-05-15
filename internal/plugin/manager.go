@@ -402,6 +402,7 @@ func (m *Manager) seedDefaultStates() {
 
 	m.logger.Info("fresh install detected, seeding default plugin states")
 	disabledByDefault := map[string]bool{
+		"appstore":    true,
 		"database":    true,
 		"docker":      true,
 		"filemanager": true,

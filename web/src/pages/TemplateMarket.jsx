@@ -5,7 +5,6 @@ import { useNavigate } from 'react-router'
 import { appstoreAPI } from '../api/index.js'
 import { useTranslation } from 'react-i18next'
 
-// Framework color mapping
 const frameworkColors = {
     nextjs: 'gray',
     nuxt: 'green',
@@ -16,6 +15,10 @@ const frameworkColors = {
     laravel: 'red',
     flask: 'green',
     django: 'green',
+}
+
+function translateFramework(t, value) {
+    return t(`appstore.framework_${value}`, { defaultValue: value })
 }
 
 export default function TemplateMarket() {
@@ -64,13 +67,9 @@ export default function TemplateMarket() {
             })
             setDeployOpen(false)
             const projectId = res.data?.project_id
-            if (projectId) {
-                navigate(`/deploy/${projectId}`)
-            } else {
-                navigate('/deploy')
-            }
+            navigate(projectId ? `/deploy/${projectId}` : '/deploy')
         } catch (err) {
-            alert(err.response?.data?.error || 'Deployment failed')
+            alert(err.response?.data?.error || t('common.operation_failed'))
         } finally {
             setDeploying(false)
         }
@@ -87,7 +86,6 @@ export default function TemplateMarket() {
 
     return (
         <Box>
-            {/* Header */}
             <Flex align="center" justify="between" mb="4" wrap="wrap" gap="3">
                 <Flex align="center" gap="2">
                     <LayoutTemplate size={24} />
@@ -101,7 +99,6 @@ export default function TemplateMarket() {
                 </Button>
             </Flex>
 
-            {/* Filters */}
             <Flex gap="3" mb="4" wrap="wrap">
                 <Box style={{ flex: 1, minWidth: 200 }}>
                     <TextField.Root
@@ -118,14 +115,13 @@ export default function TemplateMarket() {
                         <Select.Content>
                             <Select.Item value="all">{t('appstore.all_frameworks')}</Select.Item>
                             {frameworks.map(f => (
-                                <Select.Item key={f} value={f}>{f}</Select.Item>
+                                <Select.Item key={f} value={f}>{translateFramework(t, f)}</Select.Item>
                             ))}
                         </Select.Content>
                     </Select.Root>
                 )}
             </Flex>
 
-            {/* Template Grid */}
             {templates.length === 0 ? (
                 <Card>
                     <Flex align="center" justify="center" direction="column" gap="2" p="6">
@@ -141,6 +137,7 @@ export default function TemplateMarket() {
                 }}>
                     {templates.map(tpl => {
                         const tags = (() => { try { return JSON.parse(tpl.tags || '[]') } catch { return [] } })()
+                        const description = tpl.description_zh || tpl.description
                         return (
                             <Card key={tpl.id}>
                                 <Flex direction="column" gap="2">
@@ -153,7 +150,7 @@ export default function TemplateMarket() {
                                                     size="1"
                                                     color={frameworkColors[tpl.framework] || 'gray'}
                                                 >
-                                                    {tpl.framework}
+                                                    {translateFramework(t, tpl.framework)}
                                                 </Badge>
                                             )}
                                         </Box>
@@ -161,14 +158,14 @@ export default function TemplateMarket() {
                                             <Rocket size={12} /> {t('appstore.deploy_template')}
                                         </Button>
                                     </Flex>
-                                    {tpl.description && (
+                                    {description && (
                                         <Text size="2" color="gray" style={{
                                             display: '-webkit-box',
                                             WebkitLineClamp: 2,
                                             WebkitBoxOrient: 'vertical',
                                             overflow: 'hidden',
                                         }}>
-                                            {tpl.description}
+                                            {description}
                                         </Text>
                                     )}
                                     <Flex gap="1" wrap="wrap">
@@ -186,10 +183,9 @@ export default function TemplateMarket() {
                 </Box>
             )}
 
-            {/* Deploy Dialog */}
             <Dialog.Root open={deployOpen} onOpenChange={setDeployOpen}>
                 <Dialog.Content maxWidth="480px" aria-describedby={undefined}>
-                    <Dialog.Title>{t('appstore.deploy_template')} — {selectedTemplate?.name}</Dialog.Title>
+                    <Dialog.Title>{t('appstore.deploy_template')} - {selectedTemplate?.name}</Dialog.Title>
 
                     <Flex direction="column" gap="3" mt="3">
                         <Box>
@@ -214,10 +210,10 @@ export default function TemplateMarket() {
                             <Card variant="surface">
                                 <Flex direction="column" gap="1">
                                     {selectedTemplate.framework && (
-                                        <Text size="2"><strong>{t('appstore.framework_filter')}:</strong> {selectedTemplate.framework}</Text>
+                                        <Text size="2"><strong>{t('appstore.framework')}:</strong> {translateFramework(t, selectedTemplate.framework)}</Text>
                                     )}
-                                    <Text size="2"><strong>Git：</strong>{selectedTemplate.git_url}</Text>
-                                    <Text size="2"><strong>分支：</strong>{selectedTemplate.branch || 'main'}</Text>
+                                    <Text size="2"><strong>{t('appstore.git_repository')}:</strong> {selectedTemplate.git_url}</Text>
+                                    <Text size="2"><strong>{t('appstore.branch')}:</strong> {selectedTemplate.branch || 'main'}</Text>
                                 </Flex>
                             </Card>
                         )}

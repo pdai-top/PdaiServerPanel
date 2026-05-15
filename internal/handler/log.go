@@ -12,16 +12,19 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/pdai/pdai/internal/config"
+	"github.com/pdai/pdai/internal/model"
+	"gorm.io/gorm"
 )
 
 // LogHandler manages log viewing endpoints
 type LogHandler struct {
 	cfg *config.Config
+	db  *gorm.DB
 }
 
 // NewLogHandler creates a new LogHandler
-func NewLogHandler(cfg *config.Config) *LogHandler {
-	return &LogHandler{cfg: cfg}
+func NewLogHandler(cfg *config.Config, db *gorm.DB) *LogHandler {
+	return &LogHandler{cfg: cfg, db: db}
 }
 
 // GetLogs returns the last N lines from a log file
@@ -80,6 +83,18 @@ func (h *LogHandler) ListLogFiles(c *gin.Context) {
 // Download serves a log file for download
 func (h *LogHandler) Download(c *gin.Context) {
 	logType := c.DefaultQuery("type", "caddy")
+	if logType == "access" {
+		linesStr := c.DefaultQuery("lines", "1000")
+		lines, _ := strconv.Atoi(linesStr)
+		if lines <= 0 || lines > 5000 {
+			lines = 1000
+		}
+		content := strings.Join(h.accessLogLines(lines, c.DefaultQuery("search", "")), "\n")
+		c.Header("Content-Type", "text/plain; charset=utf-8")
+		c.Header("Content-Disposition", `attachment; filename="panel-access.log"`)
+		c.String(http.StatusOK, content)
+		return
+	}
 	logFile := h.resolveLogFile(logType)
 
 	if logFile == "" {
@@ -111,6 +126,49 @@ func (h *LogHandler) resolveLogFile(logType string) string {
 	default:
 		return filepath.Join(h.cfg.LogDir, logType+".log")
 	}
+}
+
+// GetAccessLog returns panel operation logs recorded in the audit table.
+func (h *LogHandler) GetAccessLog(c *gin.Context) {
+	linesStr := c.DefaultQuery("lines", "300")
+	lines, _ := strconv.Atoi(linesStr)
+	if lines <= 0 || lines > 5000 {
+		lines = 300
+	}
+	content := h.accessLogLines(lines, c.DefaultQuery("search", ""))
+	c.JSON(http.StatusOK, gin.H{
+		"lines":   content,
+		"content": strings.Join(content, "\n"),
+		"source":  "audit",
+		"total":   len(content),
+	})
+}
+
+func (h *LogHandler) accessLogLines(limit int, search string) []string {
+	var logs []model.AuditLog
+	q := h.db.Order("created_at DESC").Limit(limit)
+	if err := q.Find(&logs).Error; err != nil {
+		return []string{}
+	}
+	lines := make([]string, 0, len(logs))
+	needle := strings.ToLower(strings.TrimSpace(search))
+	for i := len(logs) - 1; i >= 0; i-- {
+		entry := logs[i]
+		line := fmt.Sprintf("%s [%s] %s %s %s %s ip=%s",
+			entry.CreatedAt.Format("2006-01-02 15:04:05"),
+			entry.Username,
+			entry.Action,
+			entry.Target,
+			entry.TargetID,
+			strings.TrimSpace(entry.Detail),
+			entry.IP,
+		)
+		if needle != "" && !strings.Contains(strings.ToLower(line), needle) {
+			continue
+		}
+		lines = append(lines, line)
+	}
+	return lines
 }
 
 // tailFile reads the last N lines from a file, optionally filtering by search term

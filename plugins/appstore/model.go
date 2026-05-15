@@ -83,18 +83,19 @@ func (InstalledApp) TableName() string { return "plugin_appstore_installed" }
 
 // ProjectTemplate represents a project starter template (e.g. Next.js boilerplate).
 type ProjectTemplate struct {
-	ID          uint      `gorm:"primaryKey" json:"id"`
-	SourceID    uint      `gorm:"index" json:"source_id"`
-	TemplateID  string    `gorm:"size:128;not null;index" json:"template_id"` // e.g. "nextjs-starter"
-	Name        string    `gorm:"size:255;not null" json:"name"`
-	Description string    `gorm:"type:text" json:"description"`
-	Framework   string    `gorm:"size:64" json:"framework"` // nextjs, nuxt, go, laravel, etc.
-	GitURL      string    `gorm:"size:512;not null" json:"git_url"`
-	Branch      string    `gorm:"size:64;default:main" json:"branch"`
-	Tags        string    `gorm:"size:512" json:"tags"` // JSON array
-	LogoURL     string    `gorm:"size:512" json:"logo_url"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID            uint      `gorm:"primaryKey" json:"id"`
+	SourceID      uint      `gorm:"index" json:"source_id"`
+	TemplateID    string    `gorm:"size:128;not null;index" json:"template_id"` // e.g. "nextjs-starter"
+	Name          string    `gorm:"size:255;not null" json:"name"`
+	Description   string    `gorm:"type:text" json:"description"`
+	DescriptionZh string    `gorm:"type:text" json:"description_zh,omitempty"`
+	Framework     string    `gorm:"size:64" json:"framework"` // nextjs, nuxt, go, laravel, etc.
+	GitURL        string    `gorm:"size:512;not null" json:"git_url"`
+	Branch        string    `gorm:"size:64;default:main" json:"branch"`
+	Tags          string    `gorm:"size:512" json:"tags"` // JSON array
+	LogoURL       string    `gorm:"size:512" json:"logo_url"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 func (ProjectTemplate) TableName() string { return "plugin_appstore_templates" }

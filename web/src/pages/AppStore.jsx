@@ -5,6 +5,10 @@ import { useNavigate, useSearchParams } from 'react-router'
 import { appstoreAPI } from '../api/index.js'
 import { useTranslation } from 'react-i18next'
 
+function translateCategory(t, value) {
+    return t(`appstore.category_${value}`, { defaultValue: value })
+}
+
 export default function AppStore() {
     const { t, i18n } = useTranslation()
     const navigate = useNavigate()
@@ -263,7 +267,7 @@ export default function AppStore() {
                             <Select.Content>
                                 <Select.Item value="all">{t('appstore.all_categories')}</Select.Item>
                                 {categories.map(c => (
-                                    <Select.Item key={c} value={c}>{c}</Select.Item>
+                                    <Select.Item key={c} value={c}>{translateCategory(t, c)}</Select.Item>
                                 ))}
                             </Select.Content>
                         </Select.Root>
@@ -319,7 +323,7 @@ export default function AppStore() {
                                                 </Text>
                                                 <Flex gap="1" wrap="wrap">
                                                     {cats.slice(0, 3).map(c => (
-                                                        <Badge key={c} variant="soft" size="1">{c}</Badge>
+                                                        <Badge key={c} variant="soft" size="1">{translateCategory(t, c)}</Badge>
                                                     ))}
                                                 </Flex>
                                             </Flex>
@@ -465,7 +469,7 @@ export default function AppStore() {
                                             </Badge>
                                             <Badge size="1" variant="soft"
                                                 color={src.sync_status === 'synced' ? 'green' : src.sync_status === 'error' ? 'red' : src.sync_status === 'syncing' ? 'orange' : 'gray'}>
-                                                {src.sync_status === 'synced' ? t('appstore.synced') : src.sync_status === 'error' ? t('appstore.sync_error') : src.sync_status === 'syncing' ? t('appstore.syncing') : 'pending'}
+                                                {src.sync_status === 'synced' ? t('appstore.synced') : src.sync_status === 'error' ? t('appstore.sync_error') : src.sync_status === 'syncing' ? t('appstore.syncing') : t('appstore.pending')}
                                             </Badge>
                                         </Flex>
                                         <Text size="1" color="gray" style={{ wordBreak: 'break-all' }}>{src.url}</Text>

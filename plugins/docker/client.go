@@ -507,9 +507,12 @@ func (c *Client) RunContainer(ctx context.Context, req *RunContainerRequest) (st
 // ImageInfo is a simplified image representation.
 type ImageInfo struct {
 	ID      string   `json:"id"`
+	ImageID string   `json:"image_id,omitempty"`
 	Tags    []string `json:"tags"`
 	Size    int64    `json:"size"`
 	Created int64    `json:"created"`
+	Used    bool     `json:"used"`
+	UsedBy  []string `json:"used_by,omitempty"`
 }
 
 // ListImages returns all local images.
@@ -527,6 +530,7 @@ func (c *Client) ListImages(ctx context.Context) ([]ImageInfo, error) {
 		}
 		result = append(result, ImageInfo{
 			ID:      id,
+			ImageID: img.ID,
 			Tags:    img.RepoTags,
 			Size:    img.Size,
 			Created: img.Created,

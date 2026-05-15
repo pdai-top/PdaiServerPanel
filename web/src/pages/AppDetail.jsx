@@ -6,6 +6,10 @@ import { appstoreAPI } from '../api/index.js'
 import { useTranslation } from 'react-i18next'
 import Markdown from 'react-markdown'
 
+function translateCategory(t, value) {
+    return t(`appstore.category_${value}`, { defaultValue: value })
+}
+
 export default function AppDetail() {
     const { t, i18n } = useTranslation()
     const { id } = useParams()
@@ -116,7 +120,7 @@ export default function AppDetail() {
                             {app.author && <Badge variant="soft" color="gray">{t('appstore.author')}: {app.author}</Badge>}
                             {app.port > 0 && <Badge variant="soft" color="gray">{t('appstore.port')}: {app.port}</Badge>}
                             {categories.map(c => (
-                                <Badge key={c} variant="soft" color="blue">{c}</Badge>
+                                <Badge key={c} variant="soft" color="blue">{translateCategory(t, c)}</Badge>
                             ))}
                         </Flex>
                         <Flex gap="3" align="center">

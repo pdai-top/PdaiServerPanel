@@ -1,6 +1,6 @@
 ﻿import { useState, useEffect, useCallback, useRef } from 'react'
 import { Box, Flex, Grid, Card, Button, IconButton, Text, Heading, Badge, Dialog, TextField, Select, Switch, Callout, Separator, Tooltip } from '@radix-ui/themes'
-import { Database, Plus, Play, Square, RotateCcw, FileText, Link, Trash2, RefreshCw, AlertCircle, CheckCircle2, Sparkles, ChevronDown, ChevronRight } from 'lucide-react'
+import { Database, Plus, Play, FileText, Link, Trash2, RefreshCw, AlertCircle, CheckCircle2, Sparkles, ChevronDown, ChevronRight } from 'lucide-react'
 import { databaseAPI, dockerAPI } from '../api/index.js'
 import { useTranslation } from 'react-i18next'
 import { useNavigate } from 'react-router'
@@ -119,6 +119,10 @@ export default function DatabaseInstances() {
     const showMessage = (type, text) => {
         setMessage({ type, text })
         setTimeout(() => setMessage(null), 4000)
+    }
+
+    const openInstance = (id) => {
+        navigate(`/database/${id}`)
     }
 
     const doAction = async (id, action, label) => {
@@ -371,7 +375,19 @@ export default function DatabaseInstances() {
             ) : (
                 <Flex direction="column" gap="3">
                     {instances.map((inst) => (
-                        <Card key={inst.id} style={{ padding: 16, background: 'var(--cp-card)', border: '1px solid var(--cp-border)' }}>
+                        <Card
+                            key={inst.id}
+                            role="button"
+                            tabIndex={0}
+                            onClick={() => openInstance(inst.id)}
+                            onKeyDown={(e) => {
+                                if (e.key === 'Enter' || e.key === ' ') {
+                                    e.preventDefault()
+                                    openInstance(inst.id)
+                                }
+                            }}
+                            style={{ padding: 16, background: 'var(--cp-card)', border: '1px solid var(--cp-border)', cursor: 'pointer' }}
+                        >
                             <Flex align="center" justify="between" wrap="wrap" gap="3">
                                 {/* Left side: info */}
                                 <Flex direction="column" gap="1" style={{ flex: 1, minWidth: 200 }}>
@@ -379,8 +395,7 @@ export default function DatabaseInstances() {
                                         <Text
                                             weight="bold"
                                             size="3"
-                                            style={{ cursor: 'pointer', color: 'var(--cp-text)' }}
-                                            onClick={() => navigate(`/database/${inst.id}`)}
+                                            style={{ color: 'var(--cp-text)' }}
                                         >
                                             {inst.name}
                                         </Text>
@@ -406,16 +421,16 @@ export default function DatabaseInstances() {
                                         >
                                             {t(`database.status_${inst.status}`) || inst.status}
                                         </Badge>
+                                        {inst.port && (
+                                            <Badge color="gray" variant="soft" size="1">
+                                                {t('database.port')}: {inst.port}
+                                            </Badge>
+                                        )}
                                     </Flex>
-                                    {inst.port && (
-                                        <Text size="2" color="gray">
-                                            {t('database.port')}: {inst.port}
-                                        </Text>
-                                    )}
                                 </Flex>
 
                                 {/* Right side: actions */}
-                                <Flex gap="2" align="center" wrap="wrap">
+                                <Flex gap="2" align="center" wrap="wrap" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
                                     {inst.source === 'remote' ? (
                                         <Tooltip content="测试连接">
                                             <IconButton
@@ -423,7 +438,7 @@ export default function DatabaseInstances() {
                                                 variant="soft"
                                                 color="green"
                                                 disabled={!!actionLoading}
-                                                onClick={() => doAction(inst.id, 'testConnection', '测试连接')}
+                                                onClick={(e) => { e.stopPropagation(); doAction(inst.id, 'testConnection', '测试连接') }}
                                             >
                                                 <CheckCircle2 size={14} />
                                             </IconButton>
@@ -437,41 +452,18 @@ export default function DatabaseInstances() {
                                                         variant="soft"
                                                         color="green"
                                                         disabled={!!actionLoading}
-                                                        onClick={() => doAction(inst.id, 'startInstance', t('docker.start'))}
+                                                        onClick={(e) => { e.stopPropagation(); doAction(inst.id, 'startInstance', t('docker.start')) }}
                                                     >
                                                         <Play size={14} />
                                                     </IconButton>
                                                 </Tooltip>
                                             )}
-                                            {inst.status === 'running' && (
-                                                <Tooltip content={t('docker.stop')}>
-                                                    <IconButton
-                                                        size="2"
-                                                        variant="soft"
-                                                        color="orange"
-                                                        disabled={!!actionLoading}
-                                                        onClick={() => doAction(inst.id, 'stopInstance', t('docker.stop'))}
-                                                    >
-                                                        <Square size={14} />
-                                                    </IconButton>
-                                                </Tooltip>
-                                            )}
-                                            <Tooltip content={t('docker.restart')}>
-                                                <IconButton
-                                                    size="2"
-                                                    variant="soft"
-                                                    disabled={!!actionLoading || inst.status === 'creating'}
-                                                    onClick={() => doAction(inst.id, 'restartInstance', t('docker.restart'))}
-                                                >
-                                                    <RotateCcw size={14} />
-                                                </IconButton>
-                                            </Tooltip>
                                             <Tooltip content={t('docker.logs')}>
                                                 <IconButton
                                                     size="2"
                                                     variant="soft"
                                                     disabled={inst.status === 'creating'}
-                                                    onClick={() => navigate(`/database/${inst.id}?tab=logs`)}
+                                                    onClick={(e) => { e.stopPropagation(); navigate(`/database/${inst.id}?tab=logs`) }}
                                                 >
                                                     <FileText size={14} />
                                                 </IconButton>
@@ -483,7 +475,7 @@ export default function DatabaseInstances() {
                                             size="2"
                                             variant="soft"
                                             disabled={inst.status !== 'running'}
-                                            onClick={() => navigate(`/database/${inst.id}?tab=connection`)}
+                                            onClick={(e) => { e.stopPropagation(); navigate(`/database/${inst.id}?tab=connection`) }}
                                         >
                                             <Link size={14} />
                                         </IconButton>
@@ -494,7 +486,7 @@ export default function DatabaseInstances() {
                                             variant="soft"
                                             color="red"
                                             disabled={!!actionLoading}
-                                            onClick={() => handleDelete(inst)}
+                                            onClick={(e) => { e.stopPropagation(); handleDelete(inst) }}
                                         >
                                             <Trash2 size={14} />
                                         </IconButton>

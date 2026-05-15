@@ -93,13 +93,18 @@ function BasicTab({ showMessage }) {
     const [saving, setSaving] = useState(false)
     const [error, setError] = useState('')
     const [siteName, setSiteName] = useState('')
+    const [securityEntranceEnabled, setSecurityEntranceEnabled] = useState(false)
+    const [securityEntrancePath, setSecurityEntrancePath] = useState('')
 
     const load = async () => {
         setLoading(true)
         setError('')
         try {
             const res = await settingAPI.getAll()
-            setSiteName(res.data?.settings?.site_name || '')
+            const settings = res.data?.settings || {}
+            setSiteName(settings.site_name || '')
+            setSecurityEntranceEnabled(settings.security_entrance_enabled === 'true')
+            setSecurityEntrancePath(settings.security_entrance_path || '')
         } catch (err) {
             setError(err.response?.data?.error || t('settings.load_failed', '加载设置失败'))
         } finally {
@@ -111,18 +116,36 @@ function BasicTab({ showMessage }) {
 
     const save = async () => {
         const value = siteName.trim()
+        const entrancePath = securityEntrancePath.trim().replace(/^\/+|\/+$/g, '')
+        if (securityEntranceEnabled && !entrancePath) {
+            setError(t('settings.security_entrance_path_required', '启用安全入口时必须填写入口路径'))
+            return
+        }
         setSaving(true)
         setError('')
         try {
             await settingAPI.update('site_name', value)
+            if (entrancePath) await settingAPI.update('security_entrance_path', entrancePath)
+            await settingAPI.update('security_entrance_enabled', securityEntranceEnabled ? 'true' : 'false')
+            if (securityEntranceEnabled && entrancePath) {
+                await fetch(`/${entrancePath}`, { credentials: 'same-origin' }).catch(() => {})
+            }
             applyPageTitle(value)
             showMessage('success', t('settings.saved', '已保存'))
             setSiteName(value)
+            setSecurityEntrancePath(entrancePath)
         } catch (err) {
             setError(err.response?.data?.error || t('settings.save_failed', '保存失败'))
         } finally {
             setSaving(false)
         }
+    }
+
+    const generateSecurityEntrancePath = () => {
+        const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+        let value = 'pdai'
+        for (let i = 0; i < 10; i++) value += chars[Math.floor(Math.random() * chars.length)]
+        setSecurityEntrancePath(value)
     }
 
     return (
@@ -168,6 +191,41 @@ function BasicTab({ showMessage }) {
                             <Text size="2" weight="medium">{formatPageTitle(siteName)}</Text>
                         </Box>
 
+                        <Box p="4" style={{ background: 'var(--cp-input-bg)', border: '1px solid var(--cp-border-subtle)', borderRadius: 8 }}>
+                            <Flex align="center" justify="between" gap="3" mb="3">
+                                <Box>
+                                    <Text size="2" weight="medium">{t('settings.security_entrance_label', '安全入口')}</Text>
+                                    <Text size="1" color="gray" as="p" mt="1">{t('settings.security_entrance_hint', '启用后，需要先访问安全入口地址，才能打开登录页。')}</Text>
+                                </Box>
+                                <Switch
+                                    checked={securityEntranceEnabled}
+                                    onCheckedChange={(checked) => {
+                                        setSecurityEntranceEnabled(checked)
+                                        if (checked && !securityEntrancePath) generateSecurityEntrancePath()
+                                    }}
+                                />
+                            </Flex>
+                            <Flex gap="2" align="center">
+                                <TextField.Root
+                                    value={securityEntrancePath}
+                                    onChange={(e) => setSecurityEntrancePath(e.target.value)}
+                                    placeholder={t('settings.security_entrance_placeholder', '例如：panelSafe2026')}
+                                    disabled={!securityEntranceEnabled}
+                                    style={{ flex: 1 }}
+                                >
+                                    <TextField.Slot>/</TextField.Slot>
+                                </TextField.Root>
+                                <Button type="button" variant="soft" onClick={generateSecurityEntrancePath} disabled={!securityEntranceEnabled}>
+                                    {t('settings.generate', '生成')}
+                                </Button>
+                            </Flex>
+                            {securityEntranceEnabled && securityEntrancePath && (
+                                <Text size="1" color="gray" as="p" mt="2">
+                                    {t('settings.security_entrance_url', '入口地址')}：{window.location.origin}/{securityEntrancePath.trim().replace(/^\/+|\/+$/g, '')}
+                                </Text>
+                            )}
+                        </Box>
+
                         <Flex justify="end" gap="2">
                             <Button variant="soft" onClick={load} disabled={saving}>{t('common.cancel', '取消')}</Button>
                             <Button onClick={save} disabled={saving}>{saving ? t('common.saving', '保存中') : t('common.save', '保存')}</Button>
@@ -188,7 +246,7 @@ function LogsTab() {
     const load = async () => {
         setLoading(true)
         try {
-            const res = type === 'system' ? await logAPI.system({ lines: 300 }) : await logAPI.get({ type, lines: 300 })
+            const res = type === 'access' ? await logAPI.access({ lines: 300 }) : await logAPI.get({ type, lines: 300 })
             const lines = Array.isArray(res.data.lines) ? res.data.lines.join('\n') : ''
             setLogs(res.data.content || res.data.logs || lines || res.data.error || '')
         } catch (err) {
@@ -206,7 +264,7 @@ function LogsTab() {
                 <Flex justify="between" align="center" mb="4" wrap="wrap" gap="3">
                     <Box>
                         <Text size="3" weight="bold">{t('settings.tab_logs')}</Text>
-                        <Text size="2" color="gray" as="p" mt="1">{t('log.subtitle', '查看面板、Caddy 和系统日志')}</Text>
+                        <Text size="2" color="gray" as="p" mt="1">{t('log.subtitle', '查看面板、Caddy 和访问日记')}</Text>
                     </Box>
                     <Flex gap="2" wrap="wrap">
                         <Select.Root value={type} onValueChange={setType}>
@@ -214,7 +272,7 @@ function LogsTab() {
                             <Select.Content>
                                 <Select.Item value="app">{t('logs.app', '应用日志')}</Select.Item>
                                 <Select.Item value="caddy">Caddy</Select.Item>
-                                <Select.Item value="system">{t('logs.system', '系统日志')}</Select.Item>
+                                <Select.Item value="access">{t('logs.access', '访问日记')}</Select.Item>
                             </Select.Content>
                         </Select.Root>
                         <Button variant="soft" onClick={load} disabled={loading}>
