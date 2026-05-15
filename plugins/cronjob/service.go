@@ -492,7 +492,18 @@ func (s *Service) runCommand(task CronTask) (*CronLog, error) {
 
 		ctx, cancel := context.WithTimeout(s.taskCtx, timeout)
 		startedAt := time.Now()
-		outStr, err := s.runTaskAction(ctx, task)
+		lastLog = &CronLog{
+			TaskID:     task.ID,
+			TaskName:   task.Name,
+			StartedAt:  startedAt,
+			FinishedAt: startedAt,
+			Status:     "running",
+		}
+		if err := s.db.Create(lastLog).Error; err != nil {
+			s.logger.Warn("failed to create running cron log", "task_id", task.ID, "err", err)
+		}
+
+		outStr, err := s.runTaskAction(ctx, task, lastLog.ID)
 		finishedAt := time.Now()
 		cancel()
 
@@ -512,17 +523,20 @@ func (s *Service) runCommand(task CronTask) (*CronLog, error) {
 			outStr = appendExecutionDetail(outStr, err.Error())
 		}
 
-		lastLog = &CronLog{
-			TaskID:     task.ID,
-			TaskName:   task.Name,
-			StartedAt:  startedAt,
-			FinishedAt: finishedAt,
-			ExitCode:   exitCode,
-			Output:     outStr,
-			Status:     status,
-			DurationMs: finishedAt.Sub(startedAt).Milliseconds(),
+		lastLog.FinishedAt = finishedAt
+		lastLog.ExitCode = exitCode
+		lastLog.Output = outStr
+		lastLog.Status = status
+		lastLog.DurationMs = finishedAt.Sub(startedAt).Milliseconds()
+		if lastLog.ID != 0 {
+			s.db.Model(&CronLog{}).Where("id = ?", lastLog.ID).Updates(map[string]interface{}{
+				"finished_at": lastLog.FinishedAt,
+				"exit_code":   lastLog.ExitCode,
+				"output":      lastLog.Output,
+				"status":      lastLog.Status,
+				"duration_ms": lastLog.DurationMs,
+			})
 		}
-		s.db.Create(lastLog)
 
 		// Update task state.
 		now := time.Now()
@@ -590,16 +604,16 @@ func appendExecutionDetail(output, detail string) string {
 	return output + "\n\n[execution error] " + detail
 }
 
-func (s *Service) runTaskAction(ctx context.Context, task CronTask) (string, error) {
+func (s *Service) runTaskAction(ctx context.Context, task CronTask, logID uint) (string, error) {
 	switch normalizeTaskType(task.Type) {
 	case taskTypeDatabaseBackup:
 		return s.runDatabaseBackupTask(task)
 	default:
-		return s.runShellTask(ctx, task)
+		return s.runShellTask(ctx, task, logID)
 	}
 }
 
-func (s *Service) runShellTask(ctx context.Context, task CronTask) (string, error) {
+func (s *Service) runShellTask(ctx context.Context, task CronTask, logID uint) (string, error) {
 	// Use POSIX sh for portability across lightweight systems such as OpenWrt,
 	// which commonly do not ship bash.
 	cmd := shellCommandContext(ctx, task.Command)
@@ -607,9 +621,11 @@ func (s *Service) runShellTask(ctx context.Context, task CronTask) (string, erro
 		cmd.Dir = task.WorkingDir
 	}
 	output := &boundedBuffer{max: maxOutputBytes}
-	cmd.Stdout = output
-	cmd.Stderr = output
+	writer := &liveLogWriter{db: s.db, logID: logID, output: output, interval: 500 * time.Millisecond}
+	cmd.Stdout = writer
+	cmd.Stderr = writer
 	err := cmd.Run()
+	writer.flush()
 	return output.String(), err
 }
 
@@ -683,11 +699,14 @@ func (s *Service) normalizeTaskConfig(task *CronTask) error {
 
 // boundedBuffer is a writer that keeps only the last `max` bytes.
 type boundedBuffer struct {
+	mu  sync.Mutex
 	buf bytes.Buffer
 	max int
 }
 
 func (b *boundedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	n, err := b.buf.Write(p)
 	// If buffer exceeds max, trim the head.
 	if b.buf.Len() > b.max {
@@ -707,7 +726,45 @@ func (b *boundedBuffer) Write(p []byte) (int, error) {
 }
 
 func (b *boundedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	return b.buf.String()
+}
+
+type liveLogWriter struct {
+	db       *gorm.DB
+	logID    uint
+	output   *boundedBuffer
+	interval time.Duration
+	mu       sync.Mutex
+	lastSync time.Time
+}
+
+func (w *liveLogWriter) Write(p []byte) (int, error) {
+	n, err := w.output.Write(p)
+	w.flushThrottled()
+	return n, err
+}
+
+func (w *liveLogWriter) flushThrottled() {
+	if w.logID == 0 || w.db == nil {
+		return
+	}
+	w.mu.Lock()
+	if !w.lastSync.IsZero() && time.Since(w.lastSync) < w.interval {
+		w.mu.Unlock()
+		return
+	}
+	w.lastSync = time.Now()
+	w.mu.Unlock()
+	w.flush()
+}
+
+func (w *liveLogWriter) flush() {
+	if w.logID == 0 || w.db == nil {
+		return
+	}
+	w.db.Model(&CronLog{}).Where("id = ?", w.logID).Update("output", w.output.String())
 }
 
 // toUint converts various numeric types to uint.

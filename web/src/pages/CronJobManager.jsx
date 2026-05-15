@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, Fragment } from 'react'
 import {
     Box, Flex, Text, Card, Badge, Button, Table, Dialog, TextField,
     Switch, TextArea, Heading, Callout, ScrollArea, Tabs,
@@ -360,35 +360,38 @@ export default function CronJobManager() {
                                 </Table.Header>
                                 <Table.Body>
                                     {logs.map(log => (
-                                        <Table.Row key={log.id}>
-                                            <Table.Cell><Text size="2">{log.task_name || `#${log.task_id}`}</Text></Table.Cell>
-                                            <Table.Cell><Text size="1">{formatDate(log.started_at)}</Text></Table.Cell>
-                                            <Table.Cell><Text size="2">{formatDuration(log.duration_ms)}</Text></Table.Cell>
-                                            <Table.Cell>{statusBadge(log.status, t)}</Table.Cell>
-                                            <Table.Cell><Text size="2">{log.exit_code}</Text></Table.Cell>
-                                            <Table.Cell>
-                                                {log.output ? (
-                                                    <Button size="1" variant="ghost" onClick={() => setExpandedLog(expandedLog === log.id ? null : log.id)}>
-                                                        {expandedLog === log.id ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-                                                    </Button>
-                                                ) : <Text size="1" color="gray">-</Text>}
-                                            </Table.Cell>
-                                        </Table.Row>
+                                        <Fragment key={log.id}>
+                                            <Table.Row>
+                                                <Table.Cell><Text size="2">{log.task_name || `#${log.task_id}`}</Text></Table.Cell>
+                                                <Table.Cell><Text size="1">{formatDate(log.started_at)}</Text></Table.Cell>
+                                                <Table.Cell><Text size="2">{formatDuration(log.duration_ms)}</Text></Table.Cell>
+                                                <Table.Cell>{statusBadge(log.status, t)}</Table.Cell>
+                                                <Table.Cell><Text size="2">{log.exit_code}</Text></Table.Cell>
+                                                <Table.Cell>
+                                                    {log.output ? (
+                                                        <Button size="1" variant="ghost" onClick={() => setExpandedLog(expandedLog === log.id ? null : log.id)}>
+                                                            {expandedLog === log.id ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                                                        </Button>
+                                                    ) : <Text size="1" color="gray">-</Text>}
+                                                </Table.Cell>
+                                            </Table.Row>
+                                            {expandedLog === log.id && log.output && (
+                                                <Table.Row>
+                                                    <Table.Cell colSpan={6}>
+                                                        <Card style={{ background: 'var(--gray-2)' }}>
+                                                            <ScrollArea style={{ maxHeight: 300 }}>
+                                                                <pre style={{ fontSize: 12, whiteSpace: 'pre-wrap', wordBreak: 'break-all', margin: 0 }}>{log.output}</pre>
+                                                            </ScrollArea>
+                                                        </Card>
+                                                    </Table.Cell>
+                                                </Table.Row>
+                                            )}
+                                        </Fragment>
                                     ))}
                                 </Table.Body>
                             </Table.Root>
                         )}
-                        {expandedLog && (() => {
-                            const log = logs.find(l => l.id === expandedLog)
-                            if (!log?.output) return null
-                            return (
-                                <Card mt="2" style={{ background: 'var(--gray-2)' }}>
-                                    <ScrollArea style={{ maxHeight: 300 }}>
-                                        <pre style={{ fontSize: 12, whiteSpace: 'pre-wrap', wordBreak: 'break-all', margin: 0 }}>{log.output}</pre>
-                                    </ScrollArea>
-                                </Card>
-                            )
-                        })()}
+
                     </Card>
                 </Tabs.Content>
             </Tabs.Root>
