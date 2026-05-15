@@ -23,6 +23,8 @@ type SettingHandler struct {
 	db *gorm.DB
 }
 
+const securityEntranceCookieName = "pdai_security_entrance"
+
 // NewSettingHandler creates a new SettingHandler
 func NewSettingHandler(db *gorm.DB) *SettingHandler {
 	return &SettingHandler{db: db}
@@ -146,6 +148,10 @@ func (h *SettingHandler) Update(c *gin.Context) {
 		return
 	}
 
+	if req.Key == "security_entrance_enabled" || req.Key == "security_entrance_path" {
+		clearSecurityEntranceCookie(c)
+	}
+
 	if req.Key == "panel_autostart" {
 		if runtime.GOOS != "linux" {
 			c.JSON(http.StatusOK, gin.H{"message": "Setting updated"})
@@ -163,6 +169,18 @@ func (h *SettingHandler) Update(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Setting updated"})
+}
+
+func clearSecurityEntranceCookie(c *gin.Context) {
+	http.SetCookie(c.Writer, &http.Cookie{
+		Name:     securityEntranceCookieName,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   c.Request.TLS != nil || c.GetHeader("X-Forwarded-Proto") == "https",
+	})
 }
 
 // validWildcardDomain matches a bare DNS suffix: at least two labels,

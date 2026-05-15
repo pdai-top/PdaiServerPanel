@@ -5,7 +5,7 @@ import {
     Select,
 } from '@radix-ui/themes'
 import {
-    Clock, Play, Plus,
+    Clock, Play, Plus, Trash2,
     Timer, RotateCcw, ChevronDown, ChevronUp,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
@@ -53,6 +53,7 @@ export default function CronJobManager() {
     const [form, setForm] = useState({ ...defaultForm })
     const [saving, setSaving] = useState(false)
     const [triggerConfirm, setTriggerConfirm] = useState(null)
+    const [deleteConfirm, setDeleteConfirm] = useState(null)
     const [expandedLog, setExpandedLog] = useState(null)
     const [activeTab, setActiveTab] = useState('tasks')
     const [logTaskId, setLogTaskId] = useState(null)
@@ -164,6 +165,22 @@ export default function CronJobManager() {
             await cronjobAPI.triggerTask(id)
             setTriggerConfirm(null)
             setTimeout(() => fetchAll(), 1000)
+        } catch (e) {
+            alert(e?.response?.data?.error || e.message)
+        }
+    }
+
+    const handleDelete = async (id) => {
+        try {
+            await cronjobAPI.deleteTask(id)
+            setDeleteConfirm(null)
+            setDialogOpen(false)
+            setEditId(null)
+            if (logTaskId === id) {
+                setLogTaskId(null)
+                setExpandedLog(null)
+            }
+            fetchAll()
         } catch (e) {
             alert(e?.response?.data?.error || e.message)
         }
@@ -461,13 +478,22 @@ export default function CronJobManager() {
                         </Flex>
                     </Flex>
 
-                    <Flex gap="3" mt="4" justify="end">
-                        <Dialog.Close>
-                            <Button variant="soft" color="gray">{t('common.cancel')}</Button>
-                        </Dialog.Close>
-                        <Button onClick={handleSave} disabled={saving || !canSave}>
-                            {saving ? t('common.loading') : t('common.save')}
-                        </Button>
+                    <Flex mt="4" justify="between" align="center" gap="3">
+                        <Box>
+                            {editId && (
+                                <Button variant="soft" color="red" onClick={() => setDeleteConfirm(editId)}>
+                                    <Trash2 size={14} /> {t('common.delete')}
+                                </Button>
+                            )}
+                        </Box>
+                        <Flex gap="3">
+                            <Dialog.Close>
+                                <Button variant="soft" color="gray">{t('common.cancel')}</Button>
+                            </Dialog.Close>
+                            <Button onClick={handleSave} disabled={saving || !canSave}>
+                                {saving ? t('common.loading') : t('common.save')}
+                            </Button>
+                        </Flex>
                     </Flex>
                 </Dialog.Content>
             </Dialog.Root>
@@ -481,6 +507,20 @@ export default function CronJobManager() {
                         <Dialog.Close><Button variant="soft" color="gray">{t('common.cancel')}</Button></Dialog.Close>
                         <Button color="green" onClick={() => handleTrigger(triggerConfirm)}>
                             <Play size={14} /> {t('cronjob.trigger')}
+                        </Button>
+                    </Flex>
+                </Dialog.Content>
+            </Dialog.Root>
+
+            {/* Delete Confirm Dialog */}
+            <Dialog.Root open={deleteConfirm != null} onOpenChange={() => setDeleteConfirm(null)}>
+                <Dialog.Content style={{ maxWidth: 400 }} aria-describedby={undefined}>
+                    <Dialog.Title>{t('common.delete')}</Dialog.Title>
+                    <Text>{t('cronjob.delete_confirm')}</Text>
+                    <Flex gap="3" mt="4" justify="end">
+                        <Dialog.Close><Button variant="soft" color="gray">{t('common.cancel')}</Button></Dialog.Close>
+                        <Button color="red" onClick={() => handleDelete(deleteConfirm)}>
+                            <Trash2 size={14} /> {t('common.delete')}
                         </Button>
                     </Flex>
                 </Dialog.Content>

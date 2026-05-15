@@ -127,9 +127,6 @@ function BasicTab({ showMessage }) {
             await settingAPI.update('site_name', value)
             if (entrancePath) await settingAPI.update('security_entrance_path', entrancePath)
             await settingAPI.update('security_entrance_enabled', securityEntranceEnabled ? 'true' : 'false')
-            if (securityEntranceEnabled && entrancePath) {
-                await fetch(`/${entrancePath}`, { credentials: 'same-origin' }).catch(() => {})
-            }
             applyPageTitle(value)
             showMessage('success', t('settings.saved', '已保存'))
             setSiteName(value)

@@ -717,7 +717,9 @@ func (s *Service) backupDocker(parentCtx context.Context, destDir string, snapID
 
 		// Use docker run to copy volume contents.
 		cpCtx, cpCancel := context.WithTimeout(parentCtx, 5*time.Minute)
+		containerName := backupContainerName("volume", name)
 		cpCmd := exec.CommandContext(cpCtx, "docker", "run", "--rm",
+			"--name", containerName,
 			"-v", name+":/source:ro",
 			"-v", volDir+":/dest",
 			"alpine", "cp", "-a", "/source/.", "/dest/")
@@ -726,10 +728,43 @@ func (s *Service) backupDocker(parentCtx context.Context, destDir string, snapID
 		} else {
 			volumes++
 		}
+		s.removeBackupContainer(containerName, snapID)
 		cpCancel()
 	}
 
 	s.addLog(snapID, "info", fmt.Sprintf("Docker volumes backed up: %d", volumes))
+}
+
+func (s *Service) removeBackupContainer(name string, snapID uint) {
+	if strings.TrimSpace(name) == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if out, err := exec.CommandContext(ctx, "docker", "rm", "-f", name).CombinedOutput(); err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg == "" {
+			msg = err.Error()
+		}
+		if !strings.Contains(strings.ToLower(msg), "no such container") {
+			s.addLog(snapID, "warn", fmt.Sprintf("Cleanup backup container %s failed: %s", name, msg))
+		}
+	}
+}
+
+func backupContainerName(kind, source string) string {
+	safeKind := sanitizeBackupName(kind)
+	if safeKind == "" {
+		safeKind = "task"
+	}
+	safeSource := sanitizeBackupName(source)
+	if safeSource == "" {
+		safeSource = "source"
+	}
+	if len(safeSource) > 32 {
+		safeSource = safeSource[:32]
+	}
+	return fmt.Sprintf("pdai-backup-%s-%s-%d", safeKind, safeSource, time.Now().UnixNano())
 }
 
 // backupDatabases performs database dumps for all managed database instances.
