@@ -26,6 +26,7 @@ import {
     CheckCircle2,
     Store,
     LayoutTemplate,
+    Monitor,
 } from 'lucide-react'
 import { useAuthStore } from '../stores/auth.js'
 import { useThemeStore } from '../stores/theme.js'
@@ -70,7 +71,7 @@ export default function Layout() {
     const navigate = useNavigate()
     const { t, i18n } = useTranslation()
     const { user, setToken, setUser, logout } = useAuthStore()
-    const { theme, toggle: toggleTheme } = useThemeStore()
+    const { mode: themeMode, theme, setMode: setThemeMode } = useThemeStore()
     const pluginNavItems = usePluginNavStore((s) => s.navItems)
     const refreshPluginNav = usePluginNavStore((s) => s.refresh)
     const [version, setVersion] = useState('')
@@ -184,9 +185,9 @@ export default function Layout() {
     const sidebarContent = (
         <>
             <Flex align="center" gap="2" p="4" pb="2">
-                <img src={logoImg} alt="Pdai" style={{ width: 32, height: 32, borderRadius: 8 }} />
+                <img src={logoImg} alt="PDai.TOP" style={{ width: 32, height: 32, borderRadius: 8 }} />
                 <Text size="4" weight="bold" style={{ color: 'var(--cp-text)' }}>
-                    Pdai
+                    派达面板
                 </Text>
                 {isMobile && (
                     <button
@@ -253,14 +254,32 @@ export default function Layout() {
                     <span>{currentLang === 'zh' ? 'EN' : '中文'}</span>
                 </button>
 
-                <button
-                    onClick={toggleTheme}
-                    className="sidebar-btn"
-                    style={{ marginBottom: 4 }}
-                >
-                    {theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
-                    <span>{theme === 'dark' ? t('nav.light_mode') : t('nav.dark_mode')}</span>
-                </button>
+                <DropdownMenu.Root>
+                    <DropdownMenu.Trigger asChild>
+                        <button className="sidebar-btn" style={{ marginBottom: 4 }}>
+                            {themeMode === 'system' ? <Monitor size={16} /> : (theme === 'dark' ? <Moon size={16} /> : <Sun size={16} />)}
+                            <span style={{ flex: 1, textAlign: 'left' }}>
+                                {themeMode === 'system'
+                                    ? t('nav.system_mode')
+                                    : (theme === 'dark' ? t('nav.dark_mode') : t('nav.light_mode'))}
+                            </span>
+                            <ChevronDown size={14} />
+                        </button>
+                    </DropdownMenu.Trigger>
+                    <DropdownMenu.Content side="top" align="start">
+                        <DropdownMenu.RadioGroup value={themeMode} onValueChange={setThemeMode}>
+                            <DropdownMenu.RadioItem value="system">
+                                <Monitor size={14} /> {t('nav.system_mode')}
+                            </DropdownMenu.RadioItem>
+                            <DropdownMenu.RadioItem value="light">
+                                <Sun size={14} /> {t('nav.light_mode')}
+                            </DropdownMenu.RadioItem>
+                            <DropdownMenu.RadioItem value="dark">
+                                <Moon size={14} /> {t('nav.dark_mode')}
+                            </DropdownMenu.RadioItem>
+                        </DropdownMenu.RadioGroup>
+                    </DropdownMenu.Content>
+                </DropdownMenu.Root>
 
                 <Dialog.Root open={changePasswordOpen} onOpenChange={setChangePasswordOpen}>
                     <DropdownMenu.Root>
@@ -341,9 +360,9 @@ export default function Layout() {
                         <Menu size={22} />
                     </button>
                     <Flex align="center" gap="2">
-                        <img src={logoImg} alt="Pdai" style={{ width: 24, height: 24, borderRadius: 6 }} />
+                        <img src={logoImg} alt="PDai.TOP" style={{ width: 24, height: 24, borderRadius: 6 }} />
                         <Text size="3" weight="bold" style={{ color: 'var(--cp-text)' }}>
-                            Pdai
+                            派达面板
                         </Text>
                     </Flex>
                     <Box style={{ width: 22 }} />
@@ -396,7 +415,7 @@ export default function Layout() {
                             fontSize: '0.7rem',
                         }}
                     >
-                        Pdai v{version}
+                        PDai.TOP v{version}
                     </Text>
                 )}
             </Box>

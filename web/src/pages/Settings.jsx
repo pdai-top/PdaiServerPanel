@@ -172,7 +172,7 @@ function BasicTab({ showMessage }) {
                         <Box>
                             <Text size="2" weight="medium">{t('settings.site_name_label', '站点名称')}</Text>
                             <Text size="1" color="gray" as="p" mt="1">
-                                {t('settings.site_name_hint', '设置后页面标题将显示为“站点名称 - 派达[pdai.top]”。留空则使用默认标题。')}
+                                {t('settings.site_name_hint', '设置后页面标题将显示为“站点名称 - PDai.TOP”。留空则使用默认标题。')}
                             </Text>
                             <TextField.Root
                                 mt="2"
