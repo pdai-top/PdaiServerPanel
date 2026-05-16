@@ -25,6 +25,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -65,10 +67,17 @@ jobs:
           tar -czf "${RELEASE_DIR}.tar.gz" "${RELEASE_DIR}"
           sha256sum "${RELEASE_DIR}.tar.gz" > "${RELEASE_DIR}.tar.gz.sha256"
 
+      - name: Write release notes
+        run: |
+          git tag -l --format='%(contents)' "${GITHUB_REF_NAME}" > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            printf 'Release %s\n' "${GITHUB_REF_NAME}" > release-notes.md
+          fi
+
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
+          body_path: release-notes.md
           files: |
             pdai-*-${{ matrix.suffix }}.tar.gz
             pdai-*-${{ matrix.suffix }}.tar.gz.sha256

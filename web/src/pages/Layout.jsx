@@ -35,6 +35,7 @@ import { useThemeStore } from '../stores/theme.js'
 import { usePluginNavStore } from '../stores/pluginNav.js'
 import { authAPI, dashboardAPI, panelUpdateAPI } from '../api/index.js'
 import { useTranslation } from 'react-i18next'
+import Markdown from 'react-markdown'
 import logoImg from '../assets/logo.png'
 import AIChatWidget from './AIChatWidget.jsx'
 
@@ -61,6 +62,14 @@ const bottomNavItems = [
     { to: '/plugins', icon: Puzzle, labelKey: 'nav.plugins', labelFallback: '插件管理' },
     { to: '/settings', icon: Settings, labelKey: 'nav.settings' },
 ]
+
+const releaseMarkdownComponents = {
+    p: ({ node, ...props }) => <Text as="p" size="2" style={{ margin: '0 0 8px', lineHeight: 1.6 }} {...props} />,
+    ul: ({ node, ...props }) => <ul style={{ margin: '0 0 8px 18px', padding: 0, lineHeight: 1.6 }} {...props} />,
+    ol: ({ node, ...props }) => <ol style={{ margin: '0 0 8px 18px', padding: 0, lineHeight: 1.6 }} {...props} />,
+    li: ({ node, ...props }) => <li style={{ marginBottom: 4 }} {...props} />,
+    a: ({ node, ...props }) => <a target="_blank" rel="noreferrer" {...props} />,
+}
 
 function SidebarLink({ to, icon: Icon, label, end, onClick }) {
     return (
@@ -552,9 +561,11 @@ export default function Layout() {
                             background: 'var(--cp-surface)',
                         }}
                     >
-                        <Text as="div" size="2" style={{ whiteSpace: 'pre-wrap', lineHeight: 1.6 }}>
-                            {updateInfo?.body || '暂无更新说明'}
-                        </Text>
+                        {updateInfo?.body ? (
+                            <Markdown components={releaseMarkdownComponents}>{updateInfo.body}</Markdown>
+                        ) : (
+                            <Text as="div" size="2" color="gray">暂无更新说明</Text>
+                        )}
                     </Box>
 
                     {updateInfo?.html_url && (
@@ -568,7 +579,7 @@ export default function Layout() {
                     {!canManageUpdate && (
                         <Callout.Root color="amber" size="1" mt="3">
                             <Callout.Icon><AlertCircle size={14} /></Callout.Icon>
-                            <Callout.Text>只有管理员可以执行面板更新。</Callout.Text>
+                            <Callout.Text>当前账号可以查看更新；准备更新和重启面板仅限管理员或所有者。</Callout.Text>
                         </Callout.Root>
                     )}
 
