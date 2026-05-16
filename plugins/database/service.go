@@ -734,7 +734,7 @@ func (s *Service) databaseDumpCommand(ctx context.Context, inst *Instance) (*exe
 		if err != nil {
 			return nil, err
 		}
-		dumpArgs := append([]string{"--single-transaction", "--routines", "--events", "--databases"}, dbNames...)
+		dumpArgs := MySQLDumpArgs(inst, dbNames)
 		if inst.IsRemote() {
 			if cmd := s.remoteMySQLDumpCommand(ctx, inst); cmd != nil {
 				return cmd, nil
@@ -779,6 +779,17 @@ func mysqlDumpDatabaseNames(ctx context.Context, inst *Instance) ([]string, erro
 		return nil, fmt.Errorf("no user databases found to back up")
 	}
 	return names, nil
+}
+
+// MySQLDumpArgs builds conservative backup flags for MySQL-compatible servers.
+// Managed services such as Aliyun RDS may expose restricted system schemas
+// where SHOW EVENTS fails, so events are skipped by default.
+func MySQLDumpArgs(inst *Instance, dbNames []string) []string {
+	args := []string{"--single-transaction", "--routines", "--skip-events", "--databases"}
+	if inst.Engine == EngineMySQL {
+		args = append(args, "--set-gtid-purged=OFF")
+	}
+	return append(args, dbNames...)
 }
 
 func (s *Service) databaseRestoreCommand(ctx context.Context, inst *Instance) (*exec.Cmd, error) {
@@ -826,8 +837,7 @@ func (s *Service) remoteMySQLDumpCommand(ctx context.Context, inst *Instance) *e
 		"-P", fmt.Sprintf("%d", inst.Port),
 		"-u", inst.DBUsername(),
 	)
-	args = append(args, "--single-transaction", "--routines", "--events", "--databases")
-	args = append(args, dbNames...)
+	args = append(args, MySQLDumpArgs(inst, dbNames)...)
 	return exec.CommandContext(ctx, "docker", args...)
 }
 

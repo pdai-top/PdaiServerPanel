@@ -236,6 +236,9 @@ func (c *DBClient) ListDatabases(ctx context.Context, inst *Instance) ([]Databas
 			if err := rows.Scan(&item.Name, &item.Charset, &item.Collation); err != nil {
 				return nil, err
 			}
+			if isSystemDatabaseName(item.Name) {
+				continue
+			}
 			out = append(out, item)
 		}
 		return out, rows.Err()
@@ -261,6 +264,15 @@ func (c *DBClient) ListDatabases(ctx context.Context, inst *Instance) ([]Databas
 		return out, rows.Err()
 	default:
 		return nil, fmt.Errorf("engine %s does not support database listing", inst.Engine)
+	}
+}
+
+func isSystemDatabaseName(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "", "information_schema", "mysql", "performance_schema", "sys", "__recycle_bin__":
+		return true
+	default:
+		return false
 	}
 }
 

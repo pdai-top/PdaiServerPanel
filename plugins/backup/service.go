@@ -838,7 +838,7 @@ func databaseDumpCommand(parentCtx context.Context, dbDir string, inst *dbplugin
 		if err != nil {
 			return nil, "", err
 		}
-		dumpArgs := append([]string{"--databases"}, dbNames...)
+		dumpArgs := dbplugin.MySQLDumpArgs(inst, dbNames)
 		if inst.IsRemote() {
 			args := []string{"-h", inst.DBHost(), "-P", fmt.Sprintf("%d", inst.Port), "-u", inst.DBUsername()}
 			args = append(args, dumpArgs...)
@@ -932,9 +932,13 @@ func (s *Service) backupDatabasesLegacy(parentCtx context.Context, destDir strin
 		// Detect engine by container name or environment.
 		if containsAny(name, "mysql", "mariadb") {
 			// Pass password via environment variable to avoid /proc exposure.
-			dumpCmd = exec.CommandContext(dumpCtx, "docker", "exec",
-				"-e", "MYSQL_PWD="+os.Getenv("PDAI_DB_ROOT_PASS"),
-				name, "mysqldump", "--all-databases", "-u", "root")
+			args := []string{"exec",
+				"-e", "MYSQL_PWD=" + os.Getenv("PDAI_DB_ROOT_PASS"),
+				name, "mysqldump", "--all-databases", "-u", "root", "--skip-events"}
+			if !strings.Contains(strings.ToLower(name), "mariadb") {
+				args = append(args, "--set-gtid-purged=OFF")
+			}
+			dumpCmd = exec.CommandContext(dumpCtx, "docker", args...)
 		} else if containsAny(name, "postgres") {
 			dumpCmd = exec.CommandContext(dumpCtx, "docker", "exec", name,
 				"pg_dumpall", "-U", "postgres")
