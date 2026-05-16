@@ -1,0 +1,20 @@
+PdaiPanel contains code and documentation derived from web-casa/webcasa.
+PdaiPanel is maintained by 派达 (pdai.top).
+
+Original upstream:
+https://github.com/web-casa/webcasa
+
+Upstream copyright notice retained for derived portions:
+Copyright (c) web-casa/webcasa contributors
+
+PdaiPanel modifications and additions:
+Copyright (c) 2026 PdaiPanel contributors
+
+License basis:
+The upstream repository README identifies the project as MIT License. At the
+time this notice was prepared, the upstream repository did not publish a
+separate root LICENSE file through GitHub.
+
+This repository contains additional modifications by PdaiPanel contributors.
+Third-party dependencies keep their own licenses and notices.
+Product names and trademarks belong to their respective owners.

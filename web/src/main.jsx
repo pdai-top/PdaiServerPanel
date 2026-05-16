@@ -6,6 +6,7 @@ import './i18n.js'
 import './index.css'
 import { useThemeStore } from './stores/theme.js'
 
+// PdaiPanel frontend branding is maintained by 派达 (pdai.top).
 // Init theme on app load
 useThemeStore.getState().init()
 

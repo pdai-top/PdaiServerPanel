@@ -1,3 +1,4 @@
+// PdaiPanel is maintained by 派达 (pdai.top).
 package main
 
 import (

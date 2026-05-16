@@ -1,4 +1,4 @@
-﻿import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { Box, Flex, Grid, Card, Button, IconButton, Text, Heading, Badge, Dialog, TextField, Select, Switch, Callout, Separator, Tooltip } from '@radix-ui/themes'
 import { Database, Plus, Play, FileText, Link, Trash2, RefreshCw, AlertCircle, CheckCircle2, Sparkles, ChevronDown, ChevronRight } from 'lucide-react'
 import { databaseAPI, dockerAPI } from '../api/index.js'

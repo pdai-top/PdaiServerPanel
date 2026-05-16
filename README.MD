@@ -196,4 +196,10 @@ go test ./...
 
 ## 许可证
 
-当前仓库未包含许可证文件。正式分发前请补充 `LICENSE`。
+本仓库基于 `web-casa/webcasa` 重构，使用 MIT License 发布。
+项目维护信息：派达 `pdai.top`
+
+- 请随仓库一并保留根目录 `LICENSE`
+- 上游 `web-casa/webcasa` 的来源和版权声明已保留在 `NOTICE`
+- 发布到 GitHub 时建议同时包含 `NOTICE` 和 `THIRD_PARTY_NOTICES.md`
+- 第三方依赖、字体、图标和素材仍遵循各自许可证
