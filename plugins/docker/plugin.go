@@ -904,7 +904,7 @@ func (p *Plugin) FrontendManifest() pluginpkg.FrontendManifest {
 	return pluginpkg.FrontendManifest{
 		ID: "docker",
 		Routes: []pluginpkg.FrontendRoute{
-			{Path: "/docker", Component: "DockerOverview", Menu: true, Icon: "Container", Label: "Docker", LabelZh: "Docker"},
+			{Path: "/docker", Component: "DockerOverview", Menu: true, Icon: "Container", Label: "Docker", LabelZh: "容器"},
 			{Path: "/docker/containers", Component: "DockerContainers", Label: "Containers", LabelZh: "容器管理"},
 			{Path: "/docker/images", Component: "DockerImages", Label: "Images", LabelZh: "镜像管理"},
 			{Path: "/docker/networks", Component: "DockerNetworks", Label: "Networks", LabelZh: "网络管理"},

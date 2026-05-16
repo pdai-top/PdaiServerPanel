@@ -26,7 +26,7 @@ func (p *Plugin) Metadata() pluginpkg.Metadata {
 		Version:      "1.0.0",
 		Description:  "Create and manage local or remote MySQL, PostgreSQL, MariaDB, Redis databases",
 		Author:       "Pdai",
-		Dependencies: []string{},
+		Dependencies: []string{"docker"},
 		Priority:     15,
 		Icon:         "Database",
 		Category:     "database",

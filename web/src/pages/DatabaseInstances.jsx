@@ -16,6 +16,32 @@ const engineDescriptions = {
     redis: '内存型数据结构存储',
 }
 
+const databaseOverviewCacheKey = 'pdai:database:overview:v1'
+const databaseOverviewCacheMaxAge = 10 * 60 * 1000
+
+function readDatabaseOverviewCache(ignoreAge = false) {
+    try {
+        const raw = localStorage.getItem(databaseOverviewCacheKey)
+        if (!raw) return null
+        const parsed = JSON.parse(raw)
+        if (!ignoreAge && Date.now() - Number(parsed.savedAt || 0) > databaseOverviewCacheMaxAge) return null
+        return parsed
+    } catch {
+        return null
+    }
+}
+
+function writeDatabaseOverviewCache(partial) {
+    try {
+        const prev = readDatabaseOverviewCache(true) || {}
+        localStorage.setItem(databaseOverviewCacheKey, JSON.stringify({
+            ...prev,
+            ...partial,
+            savedAt: Date.now(),
+        }))
+    } catch { /* ignore */ }
+}
+
 function generatePassword() {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
     const array = new Uint8Array(16)
@@ -26,14 +52,22 @@ function generatePassword() {
 export default function DatabaseInstances() {
     const { t } = useTranslation()
     const navigate = useNavigate()
+    const cachedOverviewRef = useRef(readDatabaseOverviewCache())
+    const cachedOverview = cachedOverviewRef.current
+    const hasCachedOverviewContent = !!cachedOverview && (
+        (cachedOverview.instances || []).length > 0
+        || (cachedOverview.engines || []).length > 0
+        || Object.keys(cachedOverview.presets || {}).length > 0
+        || (cachedOverview.pgTuningPresets || []).length > 0
+    )
 
-    const [dockerStatus, setDockerStatus] = useState(null)
-    const [dockerChecking, setDockerChecking] = useState(true)
-    const [instances, setInstances] = useState([])
-    const [engines, setEngines] = useState([])
-    const [presets, setPresets] = useState({})
-    const [pgTuningPresets, setPgTuningPresets] = useState([])
-    const [loading, setLoading] = useState(true)
+    const [dockerStatus, setDockerStatus] = useState(cachedOverview?.dockerStatus || null)
+    const [dockerChecking, setDockerChecking] = useState(!cachedOverview?.dockerStatus)
+    const [instances, setInstances] = useState(cachedOverview?.instances || [])
+    const [engines, setEngines] = useState(cachedOverview?.engines || [])
+    const [presets, setPresets] = useState(cachedOverview?.presets || {})
+    const [pgTuningPresets, setPgTuningPresets] = useState(cachedOverview?.pgTuningPresets || [])
+    const [loading, setLoading] = useState(!hasCachedOverviewContent)
     const [dialogOpen, setDialogOpen] = useState(false)
     const [actionLoading, setActionLoading] = useState(null)
     const [message, setMessage] = useState(null)
@@ -74,6 +108,12 @@ export default function DatabaseInstances() {
             if (engRes.status === 'fulfilled') setEngines(engRes.value.data?.engines || [])
             if (presetRes.status === 'fulfilled') setPresets(presetRes.value.data?.presets || {})
             if (pgTuneRes.status === 'fulfilled') setPgTuningPresets(pgTuneRes.value.data?.presets || [])
+            const cacheUpdate = {}
+            if (instRes.status === 'fulfilled') cacheUpdate.instances = instRes.value.data?.instances || []
+            if (engRes.status === 'fulfilled') cacheUpdate.engines = engRes.value.data?.engines || []
+            if (presetRes.status === 'fulfilled') cacheUpdate.presets = presetRes.value.data?.presets || {}
+            if (pgTuneRes.status === 'fulfilled') cacheUpdate.pgTuningPresets = pgTuneRes.value.data?.presets || []
+            if (Object.keys(cacheUpdate).length > 0) writeDatabaseOverviewCache(cacheUpdate)
         } catch { /* ignore */ } finally { setLoading(false) }
     }, [])
 
@@ -103,8 +143,11 @@ export default function DatabaseInstances() {
         try {
             const res = await dockerAPI.status()
             setDockerStatus(res.data)
+            writeDatabaseOverviewCache({ dockerStatus: res.data })
         } catch {
-            setDockerStatus({ installed: false, daemon_running: false })
+            const fallbackStatus = { installed: false, daemon_running: false }
+            setDockerStatus(fallbackStatus)
+            writeDatabaseOverviewCache({ dockerStatus: fallbackStatus })
         } finally { setDockerChecking(false) }
     }, [])
 
@@ -288,7 +331,9 @@ export default function DatabaseInstances() {
             .join(', ') || '--'
     }
 
-    if (dockerChecking || loading) {
+    const hasCachedContent = instances.length > 0 || engines.length > 0 || Object.keys(presets).length > 0 || pgTuningPresets.length > 0
+
+    if (loading && !hasCachedContent) {
         return (
             <Flex align="center" justify="center" style={{ minHeight: 200 }}>
                 <RefreshCw size={20} className="spin" />

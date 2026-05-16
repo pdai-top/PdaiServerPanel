@@ -834,12 +834,21 @@ func databaseDumpCommand(parentCtx context.Context, dbDir string, inst *dbplugin
 
 	switch inst.Engine {
 	case dbplugin.EngineMySQL, dbplugin.EngineMariaDB:
+		dbNames, err := mysqlDumpDatabaseNames(parentCtx, inst)
+		if err != nil {
+			return nil, "", err
+		}
+		dumpArgs := append([]string{"--databases"}, dbNames...)
 		if inst.IsRemote() {
-			cmd := exec.CommandContext(parentCtx, "mysqldump", "--all-databases", "-h", inst.DBHost(), "-P", fmt.Sprintf("%d", inst.Port), "-u", inst.DBUsername())
+			args := []string{"-h", inst.DBHost(), "-P", fmt.Sprintf("%d", inst.Port), "-u", inst.DBUsername()}
+			args = append(args, dumpArgs...)
+			cmd := exec.CommandContext(parentCtx, "mysqldump", args...)
 			cmd.Env = append(os.Environ(), "MYSQL_PWD="+inst.RootPassword)
 			return cmd, dumpFile, nil
 		}
-		cmd := exec.CommandContext(parentCtx, "docker", "exec", "-e", "MYSQL_PWD="+inst.RootPassword, inst.ContainerName, "mysqldump", "--all-databases", "-u", inst.DBUsername())
+		args := []string{"exec", "-e", "MYSQL_PWD=" + inst.RootPassword, inst.ContainerName, "mysqldump", "-u", inst.DBUsername()}
+		args = append(args, dumpArgs...)
+		cmd := exec.CommandContext(parentCtx, "docker", args...)
 		return cmd, dumpFile, nil
 	case dbplugin.EnginePostgres:
 		if inst.IsRemote() {
@@ -852,6 +861,24 @@ func databaseDumpCommand(parentCtx context.Context, dbDir string, inst *dbplugin
 	default:
 		return nil, "", fmt.Errorf("unsupported engine: %s", inst.Engine)
 	}
+}
+
+func mysqlDumpDatabaseNames(ctx context.Context, inst *dbplugin.Instance) ([]string, error) {
+	dbs, err := dbplugin.NewDBClient().ListDatabases(ctx, inst)
+	if err != nil {
+		return nil, fmt.Errorf("list databases for backup: %w", err)
+	}
+	names := make([]string, 0, len(dbs))
+	for _, db := range dbs {
+		name := strings.TrimSpace(db.Name)
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return nil, fmt.Errorf("no user databases found to back up")
+	}
+	return names, nil
 }
 
 func sanitizeBackupName(name string) string {

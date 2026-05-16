@@ -27,7 +27,6 @@ func (p *Plugin) Metadata() pluginpkg.Metadata {
 		Version:      "1.0.0",
 		Description:  "General-purpose scheduled task management with shell command execution",
 		Author:       "Pdai",
-		Dependencies: []string{"database"},
 		Priority:     50,
 		Icon:         "Clock",
 		Category:     "management",

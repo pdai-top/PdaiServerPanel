@@ -73,7 +73,7 @@
     "audit": "审计日志",
     "templates": "站点模板",
     "plugins": "插件管理",
-    "docker": "Docker",
+    "docker": "容器",
     "deploy": "项目部署",
     "ai": "AI 助手",
     "files": "文件管理",
@@ -1224,7 +1224,7 @@
     "hide_sidebar": "从侧边栏隐藏",
     "names": {
       "deploy": "项目部署",
-      "docker": "Docker",
+      "docker": "容器",
       "database": "数据库",
       "php": "PHP",
       "ai": "AI 助手",

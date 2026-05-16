@@ -6,7 +6,7 @@ import {
 } from '@radix-ui/themes'
 import {
     Clock, Play, Plus, Trash2,
-    Timer, RotateCcw, ChevronDown, ChevronUp,
+    Timer, RotateCcw, ChevronDown, ChevronUp, ArrowLeft,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { cronjobAPI, databaseAPI } from '../api/index.js'
@@ -73,12 +73,16 @@ export default function CronJobManager() {
         } catch { /* ignore */ }
     }, [])
 
-    const fetchLogs = useCallback(async (taskId) => {
+    const fetchLogs = useCallback(async (taskId, opts = {}) => {
         try {
             const res = taskId
                 ? await cronjobAPI.taskLogs(taskId, 50)
                 : await cronjobAPI.allLogs(50)
-            setLogs(res.data || [])
+            const nextLogs = res.data || []
+            setLogs(nextLogs)
+            if (opts.expandLatest) {
+                setExpandedLog(nextLogs[0]?.id || null)
+            }
         } catch { /* ignore */ }
     }, [])
 
@@ -205,15 +209,27 @@ export default function CronJobManager() {
 
     const viewTaskLogs = (taskId) => {
         setLogTaskId(taskId)
-        setExpandedLog(null)
         setActiveTab('logs')
-        fetchLogs(taskId)
+        fetchLogs(taskId, { expandLatest: true })
     }
 
     const viewAllLogs = () => {
         setLogTaskId(null)
         setExpandedLog(null)
         fetchLogs(null)
+    }
+
+    const handleTabChange = (value) => {
+        setActiveTab(value)
+        if (value === 'logs') {
+            viewAllLogs()
+        }
+    }
+
+    const backToTasks = () => {
+        setLogTaskId(null)
+        setExpandedLog(null)
+        setActiveTab('tasks')
     }
 
     const taskTypeLabel = (type) => {
@@ -238,11 +254,13 @@ export default function CronJobManager() {
                 </Flex>
             </Flex>
 
-            <Tabs.Root value={activeTab} onValueChange={setActiveTab}>
-                <Tabs.List>
-                    <Tabs.Trigger value="tasks"><Clock size={14} style={{ marginRight: 4 }} />{t('cronjob.title')}</Tabs.Trigger>
-                    <Tabs.Trigger value="logs"><Timer size={14} style={{ marginRight: 4 }} />{t('cronjob.logs')}</Tabs.Trigger>
-                </Tabs.List>
+            <Tabs.Root value={activeTab} onValueChange={handleTabChange}>
+                {!logTaskId && (
+                    <Tabs.List>
+                        <Tabs.Trigger value="tasks"><Clock size={14} style={{ marginRight: 4 }} />{t('cronjob.title')}</Tabs.Trigger>
+                        <Tabs.Trigger value="logs"><Timer size={14} style={{ marginRight: 4 }} />{t('cronjob.logs')}</Tabs.Trigger>
+                    </Tabs.List>
+                )}
 
                 <Tabs.Content value="tasks">
                     <Card mt="3">
@@ -337,8 +355,9 @@ export default function CronJobManager() {
                                 )}
                             </Box>
                             {logTaskId && (
-                                <Button size="1" variant="soft" onClick={viewAllLogs}>
-                                    {t('cronjob.all_logs')}
+                                <Button size="1" variant="soft" onClick={backToTasks}>
+                                    <ArrowLeft size={14} />
+                                    {t('common.back')}
                                 </Button>
                             )}
                         </Flex>
@@ -368,19 +387,17 @@ export default function CronJobManager() {
                                                 <Table.Cell>{statusBadge(log.status, t)}</Table.Cell>
                                                 <Table.Cell><Text size="2">{log.exit_code}</Text></Table.Cell>
                                                 <Table.Cell>
-                                                    {log.output ? (
-                                                        <Button size="1" variant="ghost" onClick={() => setExpandedLog(expandedLog === log.id ? null : log.id)}>
-                                                            {expandedLog === log.id ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-                                                        </Button>
-                                                    ) : <Text size="1" color="gray">-</Text>}
+                                                    <Button size="1" variant="ghost" onClick={() => setExpandedLog(expandedLog === log.id ? null : log.id)}>
+                                                        {expandedLog === log.id ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                                                    </Button>
                                                 </Table.Cell>
                                             </Table.Row>
-                                            {expandedLog === log.id && log.output && (
+                                            {expandedLog === log.id && (
                                                 <Table.Row>
                                                     <Table.Cell colSpan={6}>
                                                         <Card style={{ background: 'var(--gray-2)' }}>
                                                             <ScrollArea style={{ maxHeight: 300 }}>
-                                                                <pre style={{ fontSize: 12, whiteSpace: 'pre-wrap', wordBreak: 'break-all', margin: 0 }}>{log.output}</pre>
+                                                                <pre style={{ fontSize: 12, whiteSpace: 'pre-wrap', wordBreak: 'break-all', margin: 0 }}>{log.output || '-'}</pre>
                                                             </ScrollArea>
                                                         </Card>
                                                     </Table.Cell>

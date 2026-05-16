@@ -730,15 +730,24 @@ func (s *Service) RestoreBackup(instanceID, backupID uint) error {
 func (s *Service) databaseDumpCommand(ctx context.Context, inst *Instance) (*exec.Cmd, error) {
 	switch inst.Engine {
 	case EngineMySQL, EngineMariaDB:
+		dbNames, err := mysqlDumpDatabaseNames(ctx, inst)
+		if err != nil {
+			return nil, err
+		}
+		dumpArgs := append([]string{"--single-transaction", "--routines", "--events", "--databases"}, dbNames...)
 		if inst.IsRemote() {
 			if cmd := s.remoteMySQLDumpCommand(ctx, inst); cmd != nil {
 				return cmd, nil
 			}
-			cmd := exec.CommandContext(ctx, "mysqldump", "--single-transaction", "--routines", "--events", "--all-databases", "-h", inst.DBHost(), "-P", fmt.Sprintf("%d", inst.Port), "-u", inst.DBUsername())
+			args := []string{"-h", inst.DBHost(), "-P", fmt.Sprintf("%d", inst.Port), "-u", inst.DBUsername()}
+			args = append(args, dumpArgs...)
+			cmd := exec.CommandContext(ctx, "mysqldump", args...)
 			cmd.Env = append(os.Environ(), "MYSQL_PWD="+inst.RootPassword)
 			return cmd, nil
 		}
-		return exec.CommandContext(ctx, "docker", "exec", "-e", "MYSQL_PWD="+inst.RootPassword, inst.ContainerName, mysqlDumpBinary(inst), "--single-transaction", "--routines", "--events", "--all-databases", "-u", inst.DBUsername()), nil
+		args := []string{"exec", "-e", "MYSQL_PWD=" + inst.RootPassword, inst.ContainerName, mysqlDumpBinary(inst), "-u", inst.DBUsername()}
+		args = append(args, dumpArgs...)
+		return exec.CommandContext(ctx, "docker", args...), nil
 	case EnginePostgres:
 		if inst.IsRemote() {
 			if cmd := s.remotePostgresDumpCommand(ctx, inst); cmd != nil {
@@ -752,6 +761,24 @@ func (s *Service) databaseDumpCommand(ctx context.Context, inst *Instance) (*exe
 	default:
 		return nil, fmt.Errorf("unsupported engine: %s", inst.Engine)
 	}
+}
+
+func mysqlDumpDatabaseNames(ctx context.Context, inst *Instance) ([]string, error) {
+	dbs, err := NewDBClient().ListDatabases(ctx, inst)
+	if err != nil {
+		return nil, fmt.Errorf("list databases for backup: %w", err)
+	}
+	names := make([]string, 0, len(dbs))
+	for _, db := range dbs {
+		name := strings.TrimSpace(db.Name)
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return nil, fmt.Errorf("no user databases found to back up")
+	}
+	return names, nil
 }
 
 func (s *Service) databaseRestoreCommand(ctx context.Context, inst *Instance) (*exec.Cmd, error) {
@@ -785,17 +812,22 @@ func (s *Service) remoteMySQLDumpCommand(ctx context.Context, inst *Instance) *e
 	if _, err := exec.LookPath("docker"); err != nil {
 		return nil
 	}
+	dbNames, err := mysqlDumpDatabaseNames(ctx, inst)
+	if err != nil {
+		return nil
+	}
 	host := inst.DBHost()
 	args := append([]string{"run", "--rm"}, dockerNetworkArgs(host)...)
 	args = append(args,
 		"-e", "MYSQL_PWD="+inst.RootPassword,
 		mysqlClientImage(inst),
 		mysqlDumpBinary(inst),
-		"--single-transaction", "--routines", "--events", "--all-databases",
 		"-h", host,
 		"-P", fmt.Sprintf("%d", inst.Port),
 		"-u", inst.DBUsername(),
 	)
+	args = append(args, "--single-transaction", "--routines", "--events", "--databases")
+	args = append(args, dbNames...)
 	return exec.CommandContext(ctx, "docker", args...)
 }
 
