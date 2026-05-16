@@ -1,166 +1,82 @@
-# 派达 Pdai
+# 派达 PdaiPanel
 
-派达（Pdai）是一个面向服务器运维和应用部署的 Web 管理面板，内置 Caddy 反向代理管理、Podman/Docker 容器管理、项目部署、数据库实例、文件管理、备份、监控、定时任务、进程守护、AI 助手和 MCP 集成等能力。
+派达 PdaiPanel 是面向 Linux 服务器的轻量 Web 管理面板，定位为“下载一个二进制文件即可运行”的服务器运维与应用管理工具，所有产生文件仅存在于二进制所在目录。
 
-默认页面标题为 `派达 - PDai.TOP`，可在系统设置中修改站点名称。
+项目重点适配 Alpine、Debian、Ubuntu、OpenWrt、Rocky、AlmaLinux、Fedora 等常见发行版，并对 Alpine、Debian、OpenWrt 等运行环境做了针对性处理。
+
+默认端口为 `39921`，首次访问会引导创建管理员账号。
 
 ## 主要功能
 
-- 反向代理：管理 Caddy 站点、域名、上游、TLS、WebSocket、压缩和自定义配置。
-- 容器管理：Podman-first，兼容 Docker CLI/Socket，支持容器、镜像、网络、卷和 Compose Stack。
-- 项目部署：支持 Git 项目部署，自动识别 Node.js、Go、PHP、Python、Dockerfile、静态站点等项目类型。
-- 应用商店：通过 Docker Compose 一键安装应用，并支持项目模板市场。
-- 数据库管理：创建和管理 MySQL、PostgreSQL、MariaDB、Redis 实例，提供连接信息和查询工具。
-- PHP 管理：管理 PHP-FPM、FrankenPHP 运行时，创建 PHP 网站并安装扩展。
-- 文件管理：浏览、上传、编辑、压缩、解压文件，并提供 Web 终端。
-- 备份恢复：基于 Kopia 备份面板数据、Docker 卷和数据库。
-- 系统监控：查看 CPU、内存、磁盘、网络、容器指标，并配置告警规则。
-- 防火墙：通过 Web UI 管理 iptables 端口规则。
-- 定时任务：管理 Cron 任务，查看执行日志。
-- 进程守护：管理长期运行进程，支持自启动、自动重启和日志查看。
-- AI 助手：支持故障诊断、Dockerfile/Compose 生成、部署辅助和安全确认。
-- MCP Server：为 Cursor、Windsurf、Claude Code 等 AI IDE 提供工具调用接口。
+- **面板自更新**：面板内检测 GitHub Releases 新版本，查看更新说明，下载校验更新包，并通过临时 helper 进程延迟替换当前二进制后重启面板。
+- **站点与反向代理管理**：基于 Caddy 管理反向代理、静态站点、PHP 站点、重定向、多域名绑定、WebSocket、压缩、缓存、访问控制、自定义响应头和完整 Caddy 配置。
+- **HTTPS 与证书管理**：支持自动 HTTPS、自定义证书、证书上传、证书删除、证书到期信息读取，以及 DNS API 凭据管理。
+- **DNS 提供商管理**：支持 Cloudflare、阿里云 DNS、腾讯云 DNS、AWS Route 53 等 DNS 凭据配置，用于 DNS 验证和证书签发。
+- **Caddy 管理**：查看 Caddy 状态、启动、停止、重载、重启、查看和编辑 Caddyfile、格式化与校验配置。
+- **容器管理**：支持 Podman / Docker 环境检测、容器列表、创建容器、启动、停止、重启、删除、日志、实时资源统计、端口、卷、环境变量和网络管理。
+- **镜像管理**：支持镜像列表、拉取镜像、搜索镜像、删除镜像、清理未使用镜像。
+- **容器运行时设置**：支持 Docker / Podman 连接状态、镜像源、daemon 配置、Podman 切换和运行时安装引导。
+- **应用商店**：支持应用列表、分类、来源管理、同步应用源、安装应用、已安装应用管理、应用域名更新、启动、停止、更新和卸载。
+- **模板市场**：内置常见站点模板，支持通过模板快速创建反向代理、静态站点、PHP-FPM、WebSocket 应用等站点配置。
+- **项目部署**：支持从 Git 仓库创建项目、自动识别框架、配置安装 / 构建 / 启动命令、环境变量、端口、健康检查、自动部署和预览相关配置。
+- **数据库管理**：支持 MySQL、MariaDB、PostgreSQL、Redis 实例管理，可管理本地容器实例和远程数据库实例。
+- **数据库操作**：支持数据库、用户、权限、连接信息、状态查看，以及 SQL 查询入口。
+- **SQLite 浏览器**：提供 SQLite 数据库浏览和查询能力。
+- **文件管理器**：支持服务器文件浏览、上传、下载、删除、重命名、移动、复制、在线编辑、压缩和解压。
+- **Web 终端**：提供浏览器内终端入口，方便直接处理服务器运维任务。
+- **备份管理**：支持本地、S3、WebDAV、SFTP 等备份目标，按范围选择面板、Docker / Podman、数据库等内容进行备份。
+- **系统监控**：展示 CPU、内存、磁盘、网络等服务器运行指标，支持监控告警规则管理。
+- **防火墙管理**：通过 Web UI 管理 iptables 规则，支持端口规则和常见服务规则。
+- **定时任务**：支持创建、编辑、启停、手动触发 cron 任务，并查看任务执行日志。
+- **进程守护**：支持长期运行进程管理、自动重启和日志查看。
+- **AI 助手**：支持在面板内分析服务器状态、查看日志、辅助诊断部署、容器、数据库、监控和防火墙问题，并通过确认机制执行部分受控操作。
+- **通知与告警**：支持通知渠道、监控告警、测试通知和告警摘要等能力。
+- **插件管理**：内置 Docker、应用商店、文件管理、数据库、监控、防火墙、定时任务、进程守护、AI 助手等模块，可在面板中启用、禁用和控制侧边栏显示。
+- **用户与权限**：支持管理员资料修改、角色控制和受保护 API 访问。
+- **安全入口**：支持安全入口路径配置，降低默认面板入口暴露风险。
+- **日志管理**：支持系统日志、访问日志、日志文件列表和日志下载。
+- **单文件运行体验**：发布包内以单个 `pdai` 二进制作为主程序，首次运行自动生成默认配置文件和数据目录。
 
-## 技术栈
+## 与上游差异
 
-- 后端：Go、Gin、GORM、SQLite
-- 前端：React、Vite、Radix UI、Zustand、i18next
-- 代理：Caddy
-- 容器：Podman / Docker
+本仓库基于 `web-casa/webcasa` 重构，但当前定位、功能组合、发布方式和运行环境适配已经与上游不同。主要差异如下：
 
-## 运行环境
+- **项目定位不同**：派达面板 主要面向资源更紧缺的服务器用户，重点是轻量、少依赖、直接运行、随时停止、随时干净移除。
+- **发行版适配不同**：增加了 Alpine、Debian、Ubuntu、OpenWrt 等系统（感觉有docker的Linux应该都支持吧）。
+- **更新机制不同**：新增面板内版本检测、更新说明弹窗、更新包下载校验、准备更新和临时 helper 延迟替换重启流程。
+- **容器策略不同**：更强调 Podman ，去除 stack 概念，同时兼容 Docker CLI / Socket，适合无 Docker Desktop 的 Linux 服务器环境。
+- **部署体验不同**：去除了 Git 项目部署、PHP、站点模板 等不常用的功能。
+- **数据库能力不同**：不仅支持容器化数据库实例，也支持纳管远程 MySQL、MariaDB、PostgreSQL、Redis。
+- **运维能力不同**：增加 进程守护、数据库定时备份、容器UI管理。
 
-推荐环境：
+## 快速使用
 
-- Linux amd64 / arm64
-- Go 1.26+
-- Node.js 20+
-- Caddy 2.x
-- Podman 或 Docker
+前往 GitHub Releases 下载对应架构的 Linux 版本：
 
-已适配：
+https://github.com/pdai-top/PdaiServerPanel/releases
 
-- systemd 系统：Debian、Ubuntu、Rocky、AlmaLinux、CentOS Stream、Fedora 等
-- OpenRC / Alpine：支持基础运行、Podman 安装、OpenRC 服务管理、iptables 安装等
-
-注意：部分第三方工具是否可用取决于系统软件源，例如 Alpine 上的 Kopia 包需要仓库提供对应包。
-
-## 本地开发
-
-安装前端依赖：
-
-```bash
-cd web
-npm install
-```
-
-启动前端开发服务器：
-
-```bash
-cd web
-npm run dev
-```
-
-启动后端：
+下载后解压并运行：
 
 ```bash
-go run .
+tar -xzf pdai-*-linux-amd64.tar.gz
+cd pdai-*-linux-amd64
+chmod +x pdai
+./pdai
 ```
 
-默认监听端口：
+或者一键下载、解压并运行最新版 Linux amd64：
+
+```bash
+tmp="$(mktemp -d)" && cd "$tmp" && url="$(curl -fsSL https://api.github.com/repos/pdai-top/PdaiServerPanel/releases/latest | grep -oE 'https://[^"]+pdai-[^"]+linux-amd64\.tar\.gz' | head -n1)" && curl -fL "$url" -o pdai.tar.gz && tar -xzf pdai.tar.gz && cd pdai-*-linux-amd64 && chmod +x pdai && ./pdai
+```
+
+运行后访问：
 
 ```text
-39921
+http://服务器IP:39921
 ```
-
-首次启动会自动创建 `config.ini` 和数据目录。
-
-## 构建生产版本
-
-先构建前端：
-
-```bash
-cd web
-npm run build
-```
-
-再编译后端嵌入版：
-
-```bash
-cd ..
-go build -trimpath -ldflags "-s -w" -o dist/pdai .
-```
-
-交叉编译 Linux amd64：
-
-```bash
-GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o dist/pdai-linux-amd64 .
-```
-
-Windows PowerShell 示例：
-
-```powershell
-$env:GOOS="linux"
-$env:GOARCH="amd64"
-$env:CGO_ENABLED="0"
-go build -trimpath -ldflags "-s -w" -o dist\pdai-linux-amd64 .
-```
-
-## 配置说明
-
-常用环境变量：
-
-| 变量 | 默认值 | 说明 |
-| --- | --- | --- |
-| `PDAI_PORT` | `39921` | 面板监听端口 |
-| `PDAI_DATA_DIR` | `./data` | 数据目录 |
-| `PDAI_DB_PATH` | `./data/Pdai.db` | SQLite 数据库路径 |
-| `PDAI_JWT_SECRET` | 自动生成 | JWT 签名密钥 |
-| `PDAI_CADDY_BIN` | `caddy` | Caddy 可执行文件路径 |
-| `PDAI_CADDYFILE_PATH` | `./data/Caddyfile` | Caddyfile 路径 |
-| `PDAI_LOG_DIR` | `./data/logs` | 日志目录 |
-| `PDAI_ADMIN_API` | `http://localhost:2019` | Caddy Admin API |
-
-也可以通过 `config.ini` 设置这些变量。
-
-## 系统设置
-
-系统设置包含：
-
-- 基础设置：站点名称。设置后浏览器标题显示为 `站点名称 - 派达[pdai.top]`。
-- 日志：查看应用、Caddy 和系统日志。
-- DNS 提供商：配置 DNS API，用于 DNS Challenge。
-- Caddyfile：查看和编辑 Caddy 配置。
-- 启动脚本：配置面板启动后执行的自定义脚本。
-
-开机自动启动面板默认关闭，用户可在系统设置中手动开启。
-
-## Alpine / OpenRC 说明
-
-项目已加入 Alpine 适配：
-
-- shell 执行会优先使用 `bash`，没有 `bash` 时回退到 `/bin/sh`。
-- 面板自启动支持 OpenRC，服务脚本写入 `/etc/init.d`。
-- 裸机部署模式支持 OpenRC 服务管理。
-- Podman 安装流程支持 `apk` 和 `rc-service`。
-- 防火墙安装支持 `apk add --no-cache iptables`。
-- 容器额外进程默认使用 `sh -c`，兼容 Alpine 基础镜像。
-
-Alpine 上建议预装：
-
-```bash
-apk add --no-cache caddy podman podman-compose iptables curl tar
-```
-
-如需使用 Docker CLI 兼容入口，可安装 `podman-docker`，或让面板安装流程创建 `docker -> podman` 的兼容链接。
 
 ## 常用命令
-
-运行测试：
-
-```bash
-go test ./...
-```
 
 重置管理员密码：
 
@@ -174,22 +90,40 @@ go test ./...
 ./pdai --version
 ```
 
-## 目录结构
+## 配置文件模板
 
-```text
-.
-├── internal/          # 后端核心模块
-├── plugins/           # 插件功能模块
-├── web/               # React 前端
-├── frontend_embed.go  # 嵌入 web/dist 静态资源
-├── main.go            # 程序入口
-├── go.mod
-└── go.sum
+程序首次运行会在当前目录自动生成 `config.ini`。你也可以在运行前手动创建：
+
+```ini
+PDAI_PORT=39921
+PDAI_DATA_DIR=./data
+PDAI_DB_PATH=./data/Pdai.db
+PDAI_JWT_SECRET=请替换为足够长的随机字符串
+PDAI_CADDY_BIN=./data/caddy/caddy
+PDAI_CADDYFILE_PATH=./data/caddy/Caddyfile
+PDAI_LOG_DIR=./data/logs
+PDAI_ADMIN_API=http://localhost:2019
+GIN_MODE=release
 ```
+
+常用配置说明：
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `PDAI_PORT` | `39921` | 面板监听端口 |
+| `PDAI_DATA_DIR` | `./data` | 面板数据目录 |
+| `PDAI_DB_PATH` | `./data/Pdai.db` | SQLite 数据库路径 |
+| `PDAI_JWT_SECRET` | 自动生成 | JWT 签名密钥 |
+| `PDAI_CADDY_BIN` | `./data/caddy/caddy` | Caddy 可执行文件路径 |
+| `PDAI_CADDYFILE_PATH` | `./data/caddy/Caddyfile` | Caddyfile 路径 |
+| `PDAI_LOG_DIR` | `./data/logs` | 日志目录 |
+| `PDAI_ADMIN_API` | `http://localhost:2019` | Caddy Admin API 地址 |
+| `PDAI_UPDATE_RELEASE_API` | GitHub latest release API | 面板自更新检查地址，可用于镜像或测试源 |
+| `GIN_MODE` | `debug` | 建议生产环境设置为 `release` |
 
 ## 安全提示
 
-- 面板可以直接操作服务器、容器、文件系统和部署流程，请只暴露在可信网络或反向代理认证之后。
+- 面板可以操作服务器、容器、文件系统、数据库和部署流程，请只暴露在可信网络或反向代理认证之后。
 - 生产环境务必设置强密码，并妥善保存 `PDAI_JWT_SECRET`。
 - 使用 AI 助手执行操作前，请仔细检查确认内容。
 - 删除文件、容器、数据库、备份等操作可能不可逆，请先做好备份。
@@ -197,9 +131,9 @@ go test ./...
 ## 许可证
 
 本仓库基于 `web-casa/webcasa` 重构，使用 MIT License 发布。
+
 项目维护信息：派达 `pdai.top`
 
 - 请随仓库一并保留根目录 `LICENSE`
 - 上游 `web-casa/webcasa` 的来源和版权声明已保留在 `NOTICE`
-- 发布到 GitHub 时建议同时包含 `NOTICE` 和 `THIRD_PARTY_NOTICES.md`
 - 第三方依赖、字体、图标和素材仍遵循各自许可证

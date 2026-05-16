@@ -27,6 +27,7 @@ import (
 	"github.com/pdai/pdai/internal/model"
 	"github.com/pdai/pdai/internal/plugin"
 	"github.com/pdai/pdai/internal/service"
+	"github.com/pdai/pdai/internal/updater"
 	aiplugin "github.com/pdai/pdai/plugins/ai"
 	appstoreplugin "github.com/pdai/pdai/plugins/appstore"
 	cronjobplugin "github.com/pdai/pdai/plugins/cronjob"
@@ -141,6 +142,18 @@ func main() {
 	protected.GET("/dashboard/stats", dashH.Stats)
 	protected.GET("/news", dashH.News)
 
+	var srv *http.Server
+	updateMgr := updater.NewManager(Version, cfg.DataDir)
+	updateH := handler.NewPanelUpdateHandler(updateMgr, func(ctx context.Context) error {
+		if srv == nil {
+			return nil
+		}
+		return srv.Shutdown(ctx)
+	})
+	protected.GET("/panel-update/check", updateH.Check)
+	adminOnly.POST("/panel-update/prepare", updateH.Prepare)
+	adminOnly.POST("/panel-update/restart", updateH.Restart)
+
 	hostH := handler.NewHostHandler(hostSvc, db)
 	protected.GET("/hosts", hostH.List)
 	adminOnly.POST("/hosts", hostH.Create)
@@ -200,6 +213,8 @@ func main() {
 	setupFrontend(r)
 
 	addr := ":" + cfg.Port
+	srv = &http.Server{Addr: addr, Handler: r}
+
 	log.Printf("[INFO] Pdai starting on http://localhost%s", addr)
 	log.Printf("[INFO] Data directory: %s", cfg.DataDir)
 	log.Printf("[INFO] Caddyfile path: %s", cfg.CaddyfilePath)
@@ -207,7 +222,7 @@ func main() {
 		log.Printf("[INFO] No local config.ini found; a default one was generated in the current directory.")
 	}
 
-	if err := r.Run(addr); err != nil {
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("Failed to start server: %v", err)
 	}
 }

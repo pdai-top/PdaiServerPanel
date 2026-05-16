@@ -162,6 +162,13 @@ export const dashboardAPI = {
     news: () => api.get('/news'),
 }
 
+// ============ Panel Update ============
+export const panelUpdateAPI = {
+    check: () => api.get('/panel-update/check'),
+    prepare: () => api.post('/panel-update/prepare'),
+    restart: () => api.post('/panel-update/restart'),
+}
+
 // ============ Settings ============
 export const settingAPI = {
     getAll: () => api.get('/settings/all'),

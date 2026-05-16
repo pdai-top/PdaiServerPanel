@@ -61,7 +61,7 @@ jobs:
           RELEASE_DIR="pdai-${VERSION}-${{ matrix.suffix }}"
           mkdir -p "${RELEASE_DIR}"
           cp "dist/pdai-${{ matrix.suffix }}" "${RELEASE_DIR}/pdai"
-          cp README.MD LICENSE NOTICE THIRD_PARTY_NOTICES.md "${RELEASE_DIR}/"
+          cp README.MD LICENSE NOTICE "${RELEASE_DIR}/"
           tar -czf "${RELEASE_DIR}.tar.gz" "${RELEASE_DIR}"
           sha256sum "${RELEASE_DIR}.tar.gz" > "${RELEASE_DIR}.tar.gz.sha256"
 

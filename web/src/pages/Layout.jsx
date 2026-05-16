@@ -1,4 +1,4 @@
-import { Box, Flex, Text, DropdownMenu, Separator, Dialog, Button, TextField, Spinner, Callout } from '@radix-ui/themes'
+import { Box, Flex, Text, DropdownMenu, Separator, Dialog, Button, TextField, Spinner, Callout, Badge } from '@radix-ui/themes'
 import { useState, useEffect, useCallback } from 'react'
 import { NavLink, Outlet, useNavigate } from 'react-router'
 import {
@@ -24,6 +24,7 @@ import {
     KeyRound,
     AlertCircle,
     CheckCircle2,
+    DownloadCloud,
     Store,
     LayoutTemplate,
     Monitor,
@@ -32,7 +33,7 @@ import {
 import { useAuthStore } from '../stores/auth.js'
 import { useThemeStore } from '../stores/theme.js'
 import { usePluginNavStore } from '../stores/pluginNav.js'
-import { authAPI, dashboardAPI } from '../api/index.js'
+import { authAPI, dashboardAPI, panelUpdateAPI } from '../api/index.js'
 import { useTranslation } from 'react-i18next'
 import logoImg from '../assets/logo.png'
 import AIChatWidget from './AIChatWidget.jsx'
@@ -92,14 +93,37 @@ export default function Layout() {
         new_password: '',
         confirm_password: '',
     })
+    const [updateInfo, setUpdateInfo] = useState(null)
+    const [updateDialogOpen, setUpdateDialogOpen] = useState(false)
+    const [checkingUpdate, setCheckingUpdate] = useState(false)
+    const [preparingUpdate, setPreparingUpdate] = useState(false)
+    const [restartingUpdate, setRestartingUpdate] = useState(false)
+    const [updateMsg, setUpdateMsg] = useState(null)
 
     const currentLang = i18n.language?.startsWith('zh') ? 'zh' : 'en'
     const aiEnabled = plugins.some((p) => p.id === 'ai' && p.enabled)
+    const canManageUpdate = user?.role === 'owner' || user?.role === 'admin'
 
     const toggleLang = () => {
         const next = currentLang === 'zh' ? 'en' : 'zh'
         i18n.changeLanguage(next)
     }
+
+    const refreshUpdateInfo = useCallback(async (silent = true) => {
+        if (!silent) setCheckingUpdate(true)
+        try {
+            const res = await panelUpdateAPI.check()
+            setUpdateInfo(res.data)
+            return res.data
+        } catch {
+            if (!silent) {
+                setUpdateMsg({ type: 'error', text: '检查更新失败，请稍后重试' })
+            }
+            return null
+        } finally {
+            if (!silent) setCheckingUpdate(false)
+        }
+    }, [])
 
     useEffect(() => {
         const mql = window.matchMedia('(max-width: 767px)')
@@ -116,6 +140,10 @@ export default function Layout() {
             setVersion(res.data?.system?.panel_version || '')
         }).catch(() => { })
     }, [])
+
+    useEffect(() => {
+        refreshUpdateInfo(true)
+    }, [refreshUpdateInfo])
 
     useEffect(() => {
         refreshPluginNav()
@@ -141,6 +169,51 @@ export default function Layout() {
         if (isMobile) setSidebarOpen(false)
         logout()
         navigate('/login', { replace: true })
+    }
+
+    const handleUpdateDialogChange = (open) => {
+        setUpdateDialogOpen(open)
+        if (open) {
+            setUpdateMsg(null)
+            refreshUpdateInfo(false)
+        } else {
+            setUpdateMsg(null)
+        }
+    }
+
+    const handlePrepareUpdate = async () => {
+        if (!canManageUpdate) {
+            setUpdateMsg({ type: 'error', text: '只有管理员可以执行更新' })
+            return
+        }
+        setPreparingUpdate(true)
+        setUpdateMsg(null)
+        try {
+            const res = await panelUpdateAPI.prepare()
+            setUpdateInfo(res.data)
+            setUpdateMsg({ type: 'success', text: '更新包已准备完成，请确认是否现在重启面板' })
+        } catch (err) {
+            setUpdateMsg({ type: 'error', text: err.response?.data?.error || '准备更新失败' })
+        } finally {
+            setPreparingUpdate(false)
+        }
+    }
+
+    const handleRestartUpdate = async () => {
+        if (!canManageUpdate) {
+            setUpdateMsg({ type: 'error', text: '只有管理员可以执行更新' })
+            return
+        }
+        setRestartingUpdate(true)
+        setUpdateMsg(null)
+        try {
+            await panelUpdateAPI.restart()
+            setUpdateMsg({ type: 'success', text: '面板正在重启，请稍后刷新页面' })
+        } catch (err) {
+            setUpdateMsg({ type: 'error', text: err.response?.data?.error || '重启失败' })
+        } finally {
+            setRestartingUpdate(false)
+        }
     }
 
     const handleProfileSave = async () => {
@@ -187,6 +260,22 @@ export default function Layout() {
         }
     }
 
+    const renderUpdateBadge = () => {
+        if (!updateInfo?.update_available) return null
+        return (
+            <button
+                type="button"
+                onClick={() => handleUpdateDialogChange(true)}
+                style={{ border: 0, background: 'transparent', padding: 0, cursor: 'pointer', lineHeight: 1 }}
+                aria-label="查看面板新版本"
+            >
+                <Badge color="orange" variant="soft" size="1">
+                    有新版本
+                </Badge>
+            </button>
+        )
+    }
+
     const sidebarContent = (
         <>
             <Flex align="center" gap="2" p="4" pb="2">
@@ -194,6 +283,7 @@ export default function Layout() {
                 <Text size="4" weight="bold" style={{ color: 'var(--cp-text)' }}>
                     派达面板
                 </Text>
+                {renderUpdateBadge()}
                 {isMobile && (
                     <button
                         className="sidebar-btn"
@@ -371,6 +461,7 @@ export default function Layout() {
                         <Text size="3" weight="bold" style={{ color: 'var(--cp-text)' }}>
                             派达面板
                         </Text>
+                        {renderUpdateBadge()}
                     </Flex>
                     <Box style={{ width: 22 }} />
                 </Box>
@@ -427,6 +518,101 @@ export default function Layout() {
                 )}
                 {aiEnabled && <AIChatWidget />}
             </Box>
+
+            <Dialog.Root open={updateDialogOpen} onOpenChange={handleUpdateDialogChange}>
+                <Dialog.Content maxWidth="560px">
+                    <Dialog.Title>
+                        {updateInfo?.latest_version ? `发现新版本 v${updateInfo.latest_version}` : '面板更新'}
+                    </Dialog.Title>
+                    <Dialog.Description size="2" color="gray">
+                        当前版本：{updateInfo?.current_version || version || '-'}；最新版本：{updateInfo?.tag_name || (updateInfo?.latest_version ? `v${updateInfo.latest_version}` : '-')}
+                    </Dialog.Description>
+
+                    {checkingUpdate && (
+                        <Flex align="center" gap="2" mt="3">
+                            <Spinner size="1" />
+                            <Text size="2" color="gray">正在检查更新...</Text>
+                        </Flex>
+                    )}
+
+                    {updateInfo?.published_at && (
+                        <Text as="div" size="2" color="gray" mt="3">
+                            发布时间：{new Date(updateInfo.published_at).toLocaleString()}
+                        </Text>
+                    )}
+
+                    <Box
+                        mt="3"
+                        p="3"
+                        style={{
+                            maxHeight: 240,
+                            overflowY: 'auto',
+                            border: '1px solid var(--cp-border)',
+                            borderRadius: 8,
+                            background: 'var(--cp-surface)',
+                        }}
+                    >
+                        <Text as="div" size="2" style={{ whiteSpace: 'pre-wrap', lineHeight: 1.6 }}>
+                            {updateInfo?.body || '暂无更新说明'}
+                        </Text>
+                    </Box>
+
+                    {updateInfo?.html_url && (
+                        <Button asChild size="2" variant="soft" mt="3">
+                            <a href={updateInfo.html_url} target="_blank" rel="noreferrer">
+                                查看 GitHub Release
+                            </a>
+                        </Button>
+                    )}
+
+                    {!canManageUpdate && (
+                        <Callout.Root color="amber" size="1" mt="3">
+                            <Callout.Icon><AlertCircle size={14} /></Callout.Icon>
+                            <Callout.Text>只有管理员可以执行面板更新。</Callout.Text>
+                        </Callout.Root>
+                    )}
+
+                    {updateInfo?.reason && (
+                        <Callout.Root color="amber" size="1" mt="3">
+                            <Callout.Icon><AlertCircle size={14} /></Callout.Icon>
+                            <Callout.Text>{updateInfo.reason}</Callout.Text>
+                        </Callout.Root>
+                    )}
+
+                    {updateInfo?.prepared && (
+                        <Callout.Root color="green" size="1" mt="3">
+                            <Callout.Icon><CheckCircle2 size={14} /></Callout.Icon>
+                            <Callout.Text>更新包已准备完成，是否现在重启面板？重启时会启动临时 helper 进程延迟替换并重新拉起面板。</Callout.Text>
+                        </Callout.Root>
+                    )}
+
+                    {updateMsg && (
+                        <Callout.Root color={updateMsg.type === 'success' ? 'green' : 'red'} size="1" mt="3">
+                            <Callout.Icon>
+                                {updateMsg.type === 'success' ? <CheckCircle2 size={14} /> : <AlertCircle size={14} />}
+                            </Callout.Icon>
+                            <Callout.Text>{updateMsg.text}</Callout.Text>
+                        </Callout.Root>
+                    )}
+
+                    <Flex justify="end" gap="2" mt="4">
+                        <Dialog.Close>
+                            <Button variant="soft" disabled={preparingUpdate || restartingUpdate}>
+                                稍后
+                            </Button>
+                        </Dialog.Close>
+                        {updateInfo?.prepared ? (
+                            <Button color="red" onClick={handleRestartUpdate} disabled={!canManageUpdate || restartingUpdate}>
+                                {restartingUpdate && <Spinner size="1" />} 现在重启面板
+                            </Button>
+                        ) : (
+                            <Button onClick={handlePrepareUpdate} disabled={!canManageUpdate || preparingUpdate || checkingUpdate || !updateInfo?.can_update}>
+                                {preparingUpdate ? <Spinner size="1" /> : <DownloadCloud size={16} />} 立即更新
+                            </Button>
+                        )}
+                    </Flex>
+                </Dialog.Content>
+            </Dialog.Root>
         </Flex>
     )
 }
