@@ -240,7 +240,7 @@ func containerDetailFromInspect(inspect types.ContainerJSON) *ContainerDetail {
 			}
 			for _, binding := range bindings {
 				detail.Ports = append(detail.Ports, RunPortMapping{
-					HostIP:        binding.HostIP,
+					HostIP:        normalizePublishHostIP(binding.HostIP),
 					HostPort:      binding.HostPort,
 					ContainerPort: containerPort,
 					Protocol:      protocol,
@@ -383,7 +383,15 @@ type RunPortMapping struct {
 	HostPort      string `json:"host_port"`
 	ContainerPort string `json:"container_port"`
 	Protocol      string `json:"protocol"` // tcp|udp
-	HostIP        string `json:"host_ip"`  // default: 0.0.0.0 (all interfaces)
+	HostIP        string `json:"host_ip"`  // optional; empty publishes on all interfaces
+}
+
+func normalizePublishHostIP(hostIP string) string {
+	hostIP = strings.TrimSpace(hostIP)
+	if hostIP == "0.0.0.0" {
+		return ""
+	}
+	return hostIP
 }
 
 // RunVolumeMapping describes a single volume mount for RunContainer.
@@ -408,12 +416,8 @@ func (c *Client) RunContainer(ctx context.Context, req *RunContainerRequest) (st
 			return "", fmt.Errorf("invalid container port %s/%s: %w", p.ContainerPort, proto, err)
 		}
 		exposedPorts[containerPort] = struct{}{}
-		hostIP := p.HostIP
-		if hostIP == "" {
-			hostIP = "0.0.0.0"
-		}
 		portBindings[containerPort] = []nat.PortBinding{
-			{HostIP: hostIP, HostPort: p.HostPort},
+			{HostIP: normalizePublishHostIP(p.HostIP), HostPort: p.HostPort},
 		}
 	}
 
