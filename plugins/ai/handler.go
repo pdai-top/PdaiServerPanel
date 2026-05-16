@@ -83,11 +83,6 @@ func (h *Handler) GetConfig(c *gin.Context) {
 	c.JSON(http.StatusOK, h.svc.GetConfig())
 }
 
-// GetPresets returns available AI provider presets.
-func (h *Handler) GetPresets(c *gin.Context) {
-	c.JSON(http.StatusOK, ProviderPresets)
-}
-
 // UpdateConfig saves the AI configuration.
 func (h *Handler) UpdateConfig(c *gin.Context) {
 	var cfg AIConfig
@@ -105,15 +100,6 @@ func (h *Handler) UpdateConfig(c *gin.Context) {
 // TestConnection tests the AI API connectivity.
 func (h *Handler) TestConnection(c *gin.Context) {
 	if err := h.svc.TestConnection(c.Request.Context()); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"status": "ok"})
-}
-
-// TestEmbeddingConnection tests the embedding API connectivity.
-func (h *Handler) TestEmbeddingConnection(c *gin.Context) {
-	if err := h.svc.TestEmbeddingConnection(); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}

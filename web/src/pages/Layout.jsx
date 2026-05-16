@@ -27,6 +27,7 @@ import {
     Store,
     LayoutTemplate,
     Monitor,
+    Bot,
 } from 'lucide-react'
 import { useAuthStore } from '../stores/auth.js'
 import { useThemeStore } from '../stores/theme.js'
@@ -34,6 +35,7 @@ import { usePluginNavStore } from '../stores/pluginNav.js'
 import { authAPI, dashboardAPI } from '../api/index.js'
 import { useTranslation } from 'react-i18next'
 import logoImg from '../assets/logo.png'
+import AIChatWidget from './AIChatWidget.jsx'
 
 const navItems = [
     { to: '/', icon: LayoutDashboard, labelKey: 'nav.dashboard', end: true },
@@ -51,6 +53,7 @@ const pluginIcons = {
     ServerCog,
     Store,
     LayoutTemplate,
+    Bot,
 }
 
 const bottomNavItems = [
@@ -73,6 +76,7 @@ export default function Layout() {
     const { user, setToken, setUser, logout } = useAuthStore()
     const { mode: themeMode, theme, setMode: setThemeMode } = useThemeStore()
     const pluginNavItems = usePluginNavStore((s) => s.navItems)
+    const plugins = usePluginNavStore((s) => s.plugins)
     const refreshPluginNav = usePluginNavStore((s) => s.refresh)
     const [version, setVersion] = useState('')
     const [isMobile, setIsMobile] = useState(() =>
@@ -90,6 +94,7 @@ export default function Layout() {
     })
 
     const currentLang = i18n.language?.startsWith('zh') ? 'zh' : 'en'
+    const aiEnabled = plugins.some((p) => p.id === 'ai' && p.enabled)
 
     const toggleLang = () => {
         const next = currentLang === 'zh' ? 'en' : 'zh'
@@ -218,7 +223,9 @@ export default function Layout() {
 
                     {pluginNavItems.map((item) => {
                         const Icon = pluginIcons[item.icon] || BoxIcon
-                        const label = currentLang === 'zh' ? (item.labelZh || item.label) : (item.label || item.labelZh)
+                        const label = t(`plugins.names.${item.pluginId}`, {
+                            defaultValue: currentLang === 'zh' ? (item.labelZh || item.label) : (item.label || item.labelZh),
+                        })
                         return (
                             <SidebarLink
                                 key={`${item.pluginId}:${item.to}`}
@@ -418,6 +425,7 @@ export default function Layout() {
                         PDai.TOP v{version}
                     </Text>
                 )}
+                {aiEnabled && <AIChatWidget />}
             </Box>
         </Flex>
     )

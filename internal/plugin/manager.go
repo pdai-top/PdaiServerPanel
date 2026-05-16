@@ -354,11 +354,10 @@ func (PluginState) TableName() string { return "plugin_states" }
 func (m *Manager) isEnabled(id string) bool {
 	var state PluginState
 	if err := m.db.Where("id = ?", id).First(&state).Error; err != nil {
-		// No record — only AI plugin enabled by default on fresh installs.
-		return id == "ai"
+		return false
 	}
 	if state.Enabled == nil {
-		return id == "ai"
+		return false
 	}
 	return *state.Enabled
 }
@@ -402,6 +401,7 @@ func (m *Manager) seedDefaultStates() {
 
 	m.logger.Info("fresh install detected, seeding default plugin states")
 	disabledByDefault := map[string]bool{
+		"ai":          true,
 		"appstore":    true,
 		"database":    true,
 		"docker":      true,

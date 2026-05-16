@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	pluginpkg "github.com/pdai/pdai/internal/plugin"
@@ -18,6 +19,7 @@ type Plugin struct {
 	handler    *Handler
 	inspection *InspectionService
 	selfHeal   *SelfHealEngine
+	active     atomic.Bool
 }
 
 // New creates a new AI assistant plugin instance.
@@ -74,7 +76,9 @@ func (p *Plugin) Init(ctx *pluginpkg.Context) error {
 	p.svc.tools.inspection = p.inspection
 
 	// Create self-heal engine and subscribe to monitoring events.
-	p.selfHeal = NewSelfHealEngine(p.svc, ctx.CoreAPI, ctx.EventBus, ctx.Logger)
+	p.selfHeal = NewSelfHealEngine(p.svc, ctx.CoreAPI, ctx.EventBus, ctx.Logger, func() bool {
+		return p.active.Load()
+	})
 	p.selfHeal.Subscribe()
 
 	// Register API routes under /api/plugins/ai/
@@ -83,10 +87,8 @@ func (p *Plugin) Init(ctx *pluginpkg.Context) error {
 
 	// Config (read + admin mutations)
 	a.GET("/config", p.handler.GetConfig) // admin only — contains API keys
-	r.GET("/presets", p.handler.GetPresets)
 	a.PUT("/config", p.handler.UpdateConfig)
 	a.POST("/config/test", p.handler.TestConnection)
-	a.POST("/config/test-embedding", p.handler.TestEmbeddingConnection)
 
 	// Chat (SSE) — any logged-in user can chat
 	r.POST("/chat", p.handler.Chat)
@@ -122,6 +124,9 @@ func (p *Plugin) Init(ctx *pluginpkg.Context) error {
 	db := ctx.DB
 	logger := ctx.Logger
 	ctx.EventBus.Subscribe("deploy.build.failed", func(e pluginpkg.Event) {
+		if !p.active.Load() {
+			return
+		}
 		go p.handleBuildFailureDiagnosis(db, logger, e)
 	})
 
@@ -162,6 +167,7 @@ func (p *Plugin) handleBuildFailureDiagnosis(db *gorm.DB, logger *slog.Logger, e
 
 // Start is called after Init. Starts the inspection scheduler.
 func (p *Plugin) Start() error {
+	p.active.Store(true)
 	if p.inspection != nil {
 		p.inspection.Start()
 	}
@@ -170,6 +176,7 @@ func (p *Plugin) Start() error {
 
 // Stop cleans up resources.
 func (p *Plugin) Stop() error {
+	p.active.Store(false)
 	if p.inspection != nil {
 		p.inspection.Stop()
 	}
@@ -181,7 +188,7 @@ func (p *Plugin) FrontendManifest() pluginpkg.FrontendManifest {
 	return pluginpkg.FrontendManifest{
 		ID: "ai",
 		Routes: []pluginpkg.FrontendRoute{
-			{Path: "/ai/config", Component: "AIConfig", Menu: true, Icon: "Bot", Label: "AI Assistant", LabelZh: "AI 助手"},
+			{Path: "/ai/config", Component: "AISettings", Menu: true, Icon: "Bot", Label: "AI Assistant", LabelZh: "AI 助手"},
 		},
 		MenuGroup: "tool",
 		MenuOrder: 50,

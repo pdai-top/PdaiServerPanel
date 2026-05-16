@@ -26,6 +26,7 @@ import (
 	"github.com/pdai/pdai/internal/model"
 	"github.com/pdai/pdai/internal/plugin"
 	"github.com/pdai/pdai/internal/service"
+	aiplugin "github.com/pdai/pdai/plugins/ai"
 	appstoreplugin "github.com/pdai/pdai/plugins/appstore"
 	cronjobplugin "github.com/pdai/pdai/plugins/cronjob"
 	dbplugin "github.com/pdai/pdai/plugins/database"
@@ -238,6 +239,9 @@ func initPlugins(db *gorm.DB, protectedRouter *gin.RouterGroup, adminRouter *gin
 	}
 	if err := pluginMgr.Register(supervisorplugin.New()); err != nil {
 		return fmt.Errorf("register supervisor plugin: %w", err)
+	}
+	if err := pluginMgr.Register(aiplugin.New()); err != nil {
+		return fmt.Errorf("register ai plugin: %w", err)
 	}
 
 	if err := pluginMgr.InitAll(); err != nil {

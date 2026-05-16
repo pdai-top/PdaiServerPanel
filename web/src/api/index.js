@@ -178,6 +178,18 @@ export const pluginAPI = {
     install: (id) => api.post(`/plugins/${id}/install`),
 }
 
+// ============ AI Assistant (plugin) ============
+export const aiAPI = {
+    getConfig: () => api.get('/plugins/ai/config'),
+    updateConfig: (data) => api.put('/plugins/ai/config', data),
+    testConnection: () => api.post('/plugins/ai/config/test'),
+    listConversations: () => api.get('/plugins/ai/conversations'),
+    getConversation: (id) => api.get(`/plugins/ai/conversations/${id}`),
+    deleteConversation: (id) => api.delete(`/plugins/ai/conversations/${id}`),
+    confirm: (pendingId, approved) => api.post('/plugins/ai/confirm', { pending_id: pendingId, approved }),
+    diagnose: (logs, context) => api.post('/plugins/ai/diagnose', { logs, context }, { timeout: 120000 }),
+}
+
 // ============ App Store (plugin) ============
 export const appstoreAPI = {
     listApps: (params) => api.get('/plugins/appstore/apps', { params }),

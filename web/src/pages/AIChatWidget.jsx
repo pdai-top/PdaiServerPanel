@@ -850,7 +850,7 @@ export default function AIChatWidget() {
                         <Flex direction="column" align="center" justify="center" style={{ flex: 1 }} gap="3" p="4">
                             <Sparkles size={48} style={{ opacity: 0.3 }} />
                             <Text size="2" color="gray" align="center">{t('ai.not_configured')}</Text>
-                            <Button variant="soft" size="2" onClick={() => { closeAiChat(); window.location.href = '/settings?tab=ai' }}>
+                            <Button variant="soft" size="2" onClick={() => { closeAiChat(); window.location.href = '/ai/config' }}>
                                 {t('ai.go_settings')}
                             </Button>
                         </Flex>

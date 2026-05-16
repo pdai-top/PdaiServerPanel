@@ -67,7 +67,7 @@ func NewService(db *gorm.DB, configStore *pluginpkg.ConfigStore, coreAPI pluginp
 	}
 	// Set back-reference so tools that need AI generation can access the service.
 	toolReg.svc = svc
-	// Initialize embedding client from saved config.
+	// Keep embedding disabled; memory search uses keyword fallback.
 	svc.initEmbeddingClient()
 	return svc
 }
@@ -82,16 +82,11 @@ func (s *Service) GetConfig() AIConfig {
 	if apiFormat == "" {
 		apiFormat = "openai-chat"
 	}
-	encEmbKey := s.configStore.Get("embedding_api_key")
-	embAPIKey, _ := Decrypt(encEmbKey, s.jwtSecret)
 	return AIConfig{
-		BaseURL:          s.configStore.Get("base_url"),
-		APIKey:           MaskAPIKey(apiKey),
-		Model:            s.configStore.Get("model"),
-		APIFormat:        apiFormat,
-		EmbeddingModel:   s.configStore.Get("embedding_model"),
-		EmbeddingBaseURL: s.configStore.Get("embedding_base_url"),
-		EmbeddingAPIKey:  MaskAPIKey(embAPIKey),
+		BaseURL:   s.configStore.Get("base_url"),
+		APIKey:    MaskAPIKey(apiKey),
+		Model:     s.configStore.Get("model"),
+		APIFormat: apiFormat,
 	}
 }
 
@@ -114,22 +109,9 @@ func (s *Service) UpdateConfig(cfg AIConfig) error {
 	if cfg.APIFormat != "" {
 		s.configStore.Set("api_format", cfg.APIFormat)
 	}
-	// Save embedding model (empty string disables embedding).
-	s.configStore.Set("embedding_model", cfg.EmbeddingModel)
-	// Save separate embedding API credentials.
-	if cfg.EmbeddingBaseURL != "" {
-		s.configStore.Set("embedding_base_url", strings.TrimRight(cfg.EmbeddingBaseURL, "/"))
-	} else {
-		s.configStore.Set("embedding_base_url", "")
-	}
-	if cfg.EmbeddingAPIKey != "" && !strings.Contains(cfg.EmbeddingAPIKey, "****") {
-		enc, err := Encrypt(cfg.EmbeddingAPIKey, s.jwtSecret)
-		if err != nil {
-			return fmt.Errorf("encrypt embedding api key: %w", err)
-		}
-		s.configStore.Set("embedding_api_key", enc)
-	}
-	// Re-initialize the embedding client with the new config.
+	s.configStore.Set("embedding_model", "")
+	s.configStore.Set("embedding_base_url", "")
+	s.configStore.Set("embedding_api_key", "")
 	s.initEmbeddingClient()
 	return nil
 }
@@ -141,35 +123,6 @@ func (s *Service) TestConnection(ctx context.Context) error {
 		return err
 	}
 	return client.TestConnection(ctx)
-}
-
-// TestEmbeddingConnection tests the embedding API connectivity.
-func (s *Service) TestEmbeddingConnection() error {
-	embModel := s.configStore.Get("embedding_model")
-	if embModel == "" {
-		return fmt.Errorf("embedding model not configured")
-	}
-
-	baseURL := s.configStore.Get("embedding_base_url")
-	encKey := s.configStore.Get("embedding_api_key")
-	if baseURL == "" {
-		baseURL = s.configStore.Get("base_url")
-	}
-	if encKey == "" {
-		encKey = s.configStore.Get("api_key")
-	}
-	if baseURL == "" || encKey == "" {
-		return fmt.Errorf("embedding API credentials not configured")
-	}
-
-	apiKey, err := Decrypt(encKey, s.jwtSecret)
-	if err != nil {
-		return fmt.Errorf("decrypt embedding api key: %w", err)
-	}
-
-	client := NewEmbeddingClient(baseURL, apiKey, embModel)
-	_, err = client.Embed("test")
-	return err
 }
 
 // ── Conversations ──
@@ -917,39 +870,9 @@ func (s *Service) buildMessages(userID uint, history []Message, pageContext stri
 	return msgs
 }
 
-// initEmbeddingClient initializes the embedding client from saved config.
-// Uses separate embedding_base_url / embedding_api_key when provided,
-// otherwise falls back to the main chat base_url / api_key.
+// initEmbeddingClient keeps vector search disabled; memory search uses keyword fallback.
 func (s *Service) initEmbeddingClient() {
-	embModel := s.configStore.Get("embedding_model")
-	if embModel == "" {
-		// No embedding model configured — disable vector search, use keyword fallback.
-		s.memory.SetEmbeddingClient(nil)
-		return
-	}
-
-	// Prefer dedicated embedding credentials if set.
-	baseURL := s.configStore.Get("embedding_base_url")
-	encKey := s.configStore.Get("embedding_api_key")
-
-	// Fall back to main chat credentials.
-	if baseURL == "" {
-		baseURL = s.configStore.Get("base_url")
-	}
-	if encKey == "" {
-		encKey = s.configStore.Get("api_key")
-	}
-
-	if baseURL == "" || encKey == "" {
-		return
-	}
-
-	apiKey, err := Decrypt(encKey, s.jwtSecret)
-	if err != nil {
-		return
-	}
-
-	s.memory.SetEmbeddingClient(NewEmbeddingClient(baseURL, apiKey, embModel))
+	s.memory.SetEmbeddingClient(nil)
 }
 
 // extractMemories uses the LLM to extract key facts from a conversation turn.

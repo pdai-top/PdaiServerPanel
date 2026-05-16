@@ -18,16 +18,18 @@ type SelfHealEngine struct {
 	coreAPI      pluginpkg.CoreAPI
 	eventBus     *pluginpkg.EventBus
 	logger       *slog.Logger
+	enabled      func() bool
 	lastHealTime time.Time // rate-limit: prevent repeated actions
 }
 
 // NewSelfHealEngine creates a new self-heal engine.
-func NewSelfHealEngine(svc *Service, coreAPI pluginpkg.CoreAPI, eventBus *pluginpkg.EventBus, logger *slog.Logger) *SelfHealEngine {
+func NewSelfHealEngine(svc *Service, coreAPI pluginpkg.CoreAPI, eventBus *pluginpkg.EventBus, logger *slog.Logger, enabled func() bool) *SelfHealEngine {
 	return &SelfHealEngine{
 		svc:      svc,
 		coreAPI:  coreAPI,
 		eventBus: eventBus,
 		logger:   logger,
+		enabled:  enabled,
 	}
 }
 
@@ -37,6 +39,9 @@ func (sh *SelfHealEngine) Subscribe() {
 		return
 	}
 	sh.eventBus.Subscribe("monitoring.alert.fired", func(e pluginpkg.Event) {
+		if sh.enabled != nil && !sh.enabled() {
+			return
+		}
 		go sh.handleAlert(e)
 	})
 	sh.logger.Info("self-heal engine subscribed to monitoring.alert.fired")

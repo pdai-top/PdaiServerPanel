@@ -26,6 +26,7 @@ import PluginsPage from './pages/PluginsPage.jsx'
 import AppStore from './pages/AppStore.jsx'
 import AppDetail from './pages/AppDetail.jsx'
 import TemplateMarket from './pages/TemplateMarket.jsx'
+import AISettings from './pages/AISettings.jsx'
 
 function ProtectedRoute({ children }) {
     const token = useAuthStore((s) => s.token)
@@ -79,6 +80,7 @@ export default function App() {
                     <Route path="database/query" element={<DatabaseQuery />} />
                     <Route path="database/:id" element={<DatabaseDetail />} />
                     <Route path="settings" element={<Settings />} />
+                    <Route path="ai/config" element={<AISettings />} />
                     <Route path="monitoring" element={<MonitoringDashboard />} />
                     <Route path="firewall" element={<FirewallManager />} />
                     <Route path="cronjob" element={<CronJobManager />} />
