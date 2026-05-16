@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - develop
+  pull_request:
+    branches:
+      - main
+      - master
+
+jobs:
+  build:
+    name: Build and Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: web
+        run: npm run build
+
+      - name: Frontend utility tests
+        working-directory: web
+        run: npm run --if-present test:composerize
+
+      - name: Go vet
+        run: go vet ./...
+
+      - name: Go tests
+        env:
+          GOTELEMETRY: 'off'
+        run: go test ./... -count=1 -timeout=10m
+
+      - name: Build Linux binaries
+        env:
+          CGO_ENABLED: '0'
+        run: |
+          mkdir -p dist
+          VERSION="${GITHUB_SHA::12}"
+          GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -X main.Version=${VERSION}" -o dist/pdai-linux-amd64 .
+          GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w -X main.Version=${VERSION}" -o dist/pdai-linux-arm64 .
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdai-linux-binaries
+          path: |
+            dist/pdai-linux-amd64
+            dist/pdai-linux-arm64
+          retention-days: 7
