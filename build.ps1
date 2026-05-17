@@ -7,7 +7,23 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $root
 
-$version = Get-Date -Format "yyMMddHHss"
+function Get-BuildVersion {
+    $tag = & git describe --tags --exact-match HEAD 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        $tag = & git describe --tags --abbrev=0 2>$null
+    }
+    if ($LASTEXITCODE -eq 0) {
+        $tag = ($tag | Out-String).Trim()
+    } else {
+        $tag = ""
+    }
+    if ($tag) {
+        return $tag.TrimStart("v")
+    }
+    return Get-Date -Format "yyMMddHHss"
+}
+
+$version = Get-BuildVersion
 $ldflags = "-s -w -X main.Version=$version"
 
 function Invoke-Checked {

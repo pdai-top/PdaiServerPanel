@@ -485,10 +485,28 @@ func isUpdateAvailable(current, latest string) bool {
 	if current == "" || current == "dev" {
 		return true
 	}
+	if isTimestampBuildVersion(current) {
+		if _, ok := semverParts(latest); ok {
+			return true
+		}
+	}
 	if cmp, ok := compareSemver(latest, current); ok {
 		return cmp > 0
 	}
 	return current != latest
+}
+
+func isTimestampBuildVersion(v string) bool {
+	v = strings.TrimSpace(strings.TrimPrefix(v, "v"))
+	if len(v) < 8 || strings.Contains(v, ".") {
+		return false
+	}
+	for _, r := range v {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func compareSemver(a, b string) (int, bool) {
