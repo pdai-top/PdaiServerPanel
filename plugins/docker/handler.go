@@ -89,7 +89,11 @@ func (h *Handler) UpdateContainer(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	ctx, cancel := h.ctx()
+	timeout := 30 * time.Second
+	if req.ForcePullImage {
+		timeout = 10 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	id, err := h.client.UpdateContainer(ctx, c.Param("id"), &req)
 	if err != nil {

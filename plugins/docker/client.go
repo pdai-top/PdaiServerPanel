@@ -187,16 +187,29 @@ func (c *Client) UpdateContainer(ctx context.Context, id string, req *RunContain
 		return "", fmt.Errorf("container not found")
 	}
 
-	_ = c.StopContainer(ctx, id)
-	if err := c.RemoveContainer(ctx, id); err != nil {
-		return "", fmt.Errorf("remove old container: %w", err)
-	}
-
 	if req.Name == "" {
 		req.Name = current.Name
 	}
 	if req.Image == "" {
 		req.Image = current.Image
+	}
+	if req.ForcePullImage {
+		reader, err := c.PullImage(ctx, req.Image)
+		if err != nil {
+			return "", fmt.Errorf("pull image %s: %w", req.Image, err)
+		}
+		if _, err := io.Copy(io.Discard, reader); err != nil {
+			reader.Close()
+			return "", fmt.Errorf("pull image %s: %w", req.Image, err)
+		}
+		if err := reader.Close(); err != nil {
+			return "", fmt.Errorf("pull image %s: %w", req.Image, err)
+		}
+	}
+
+	_ = c.StopContainer(ctx, id)
+	if err := c.RemoveContainer(ctx, id); err != nil {
+		return "", fmt.Errorf("remove old container: %w", err)
 	}
 
 	return c.RunContainer(ctx, req)
@@ -366,16 +379,17 @@ func (c *Client) GetContainerStats(ctx context.Context, id string) (*ContainerSt
 
 // RunContainerRequest describes a standalone container to create and start.
 type RunContainerRequest struct {
-	Image         string             `json:"image"`
-	Name          string             `json:"name"`
-	Ports         []RunPortMapping   `json:"ports"`
-	Volumes       []RunVolumeMapping `json:"volumes"`
-	Env           []string           `json:"env"`            // KEY=VALUE
-	RestartPolicy string             `json:"restart_policy"` // no|always|unless-stopped|on-failure
-	Network       string             `json:"network"`
-	Command       string             `json:"command"`
-	MemoryLimit   int64              `json:"memory_limit"` // bytes, 0 = unlimited
-	CPULimit      float64            `json:"cpu_limit"`    // cores, 0 = unlimited
+	Image          string             `json:"image"`
+	Name           string             `json:"name"`
+	Ports          []RunPortMapping   `json:"ports"`
+	Volumes        []RunVolumeMapping `json:"volumes"`
+	Env            []string           `json:"env"`            // KEY=VALUE
+	RestartPolicy  string             `json:"restart_policy"` // no|always|unless-stopped|on-failure
+	Network        string             `json:"network"`
+	Command        string             `json:"command"`
+	MemoryLimit    int64              `json:"memory_limit"` // bytes, 0 = unlimited
+	CPULimit       float64            `json:"cpu_limit"`    // cores, 0 = unlimited
+	ForcePullImage bool               `json:"force_pull_image"`
 }
 
 // RunPortMapping describes a single port mapping for RunContainer.

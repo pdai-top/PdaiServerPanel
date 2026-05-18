@@ -558,6 +558,7 @@ function RunContainerDialog({ open, onClose, onCreated, onDeleted, container }) 
     const [command, setCommand] = useState('')
     const [memoryLimit, setMemoryLimit] = useState('')
     const [cpuLimit, setCpuLimit] = useState('')
+    const [forcePullImage, setForcePullImage] = useState(false)
     const [networks, setNetworks] = useState([])
     const [creating, setCreating] = useState(false)
     const [deleting, setDeleting] = useState(false)
@@ -602,6 +603,7 @@ function RunContainerDialog({ open, onClose, onCreated, onDeleted, container }) 
             setCommand(detail.command || '')
             setMemoryLimit(detail.memory_limit ? String(Math.round(detail.memory_limit / 1024 / 1024)) : '')
             setCpuLimit(detail.cpu_limit ? String(detail.cpu_limit) : '')
+            setForcePullImage(false)
         }).catch((e) => {
             if (!cancelled) setError(e.response?.data?.error || e.message)
         }).finally(() => {
@@ -614,6 +616,7 @@ function RunContainerDialog({ open, onClose, onCreated, onDeleted, container }) 
         setImage(''); setName(''); setPorts([]); setVolumes([]); setEnvVars([])
         setNetwork(''); setRestartPolicy('unless-stopped'); setCommand('')
         setMemoryLimit(''); setCpuLimit(''); setError('')
+        setForcePullImage(false)
         setSearchResults([]); setShowSearch(false)
         setAdvancedOpen(false)
     }
@@ -657,6 +660,7 @@ function RunContainerDialog({ open, onClose, onCreated, onDeleted, container }) 
                 command: command.trim(),
                 memory_limit: memoryLimit ? parseInt(memoryLimit) * 1024 * 1024 : 0,
                 cpu_limit: cpuLimit ? parseFloat(cpuLimit) : 0,
+                force_pull_image: isEdit ? forcePullImage : false,
             }
             if (isEdit) {
                 await dockerAPI.updateContainer(container.id, data)
@@ -740,6 +744,16 @@ function RunContainerDialog({ open, onClose, onCreated, onDeleted, container }) 
                                     </Button>
                                 </TextField.Slot>
                             </TextField.Root>
+                            {isEdit && (
+                                <Flex align="center" gap="2" mt="2">
+                                    <input
+                                        type="checkbox"
+                                        checked={forcePullImage}
+                                        onChange={(e) => setForcePullImage(e.target.checked)}
+                                    />
+                                    <Text size="2">{t('docker.force_pull_image')}</Text>
+                                </Flex>
+                            )}
                         </Box>
                     </Flex>
                     <Box>

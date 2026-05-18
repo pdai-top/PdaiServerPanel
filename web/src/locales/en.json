@@ -809,6 +809,7 @@
     "image_outdated_hint": "A newer image for this tag has been pulled locally. Recreate this container to pick up the latest version.",
     "name": "Name",
     "image": "Image",
+    "force_pull_image": "Force pull",
     "no_images": "No images found",
     "created_at": "Created",
     "official": "Official",
