@@ -69,10 +69,12 @@ jobs:
 
       - name: Write release notes
         run: |
-          git tag -l --format='%(contents)' "${GITHUB_REF_NAME}" > release-notes.md
+          git fetch --force --tags origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+          git for-each-ref "refs/tags/${GITHUB_REF_NAME}" --format='%(contents)' > release-notes.md
           if [ ! -s release-notes.md ]; then
             printf 'Release %s\n' "${GITHUB_REF_NAME}" > release-notes.md
           fi
+          cat release-notes.md
 
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
@@ -81,3 +83,19 @@ jobs:
           files: |
             pdai-*-${{ matrix.suffix }}.tar.gz
             pdai-*-${{ matrix.suffix }}.tar.gz.sha256
+
+      - name: Sync release body
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs')
+            const body = fs.readFileSync('release-notes.md', 'utf8')
+            const { owner, repo } = context.repo
+            const tag = context.ref.replace('refs/tags/', '')
+            const release = await github.rest.repos.getReleaseByTag({ owner, repo, tag })
+            await github.rest.repos.updateRelease({
+              owner,
+              repo,
+              release_id: release.data.id,
+              body,
+            })
