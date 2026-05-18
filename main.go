@@ -151,8 +151,8 @@ func main() {
 		return srv.Shutdown(ctx)
 	})
 	protected.GET("/panel-update/check", updateH.Check)
-	adminOnly.POST("/panel-update/prepare", updateH.Prepare)
-	adminOnly.POST("/panel-update/restart", updateH.Restart)
+	protected.POST("/panel-update/prepare", updateH.Prepare)
+	protected.POST("/panel-update/restart", updateH.Restart)
 
 	hostH := handler.NewHostHandler(hostSvc, db)
 	protected.GET("/hosts", hostH.List)

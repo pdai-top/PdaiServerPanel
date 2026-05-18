@@ -111,7 +111,6 @@ export default function Layout() {
 
     const currentLang = i18n.language?.startsWith('zh') ? 'zh' : 'en'
     const aiEnabled = plugins.some((p) => p.id === 'ai' && p.enabled)
-    const canManageUpdate = user?.role === 'owner' || user?.role === 'admin'
 
     const toggleLang = () => {
         const next = currentLang === 'zh' ? 'en' : 'zh'
@@ -191,10 +190,6 @@ export default function Layout() {
     }
 
     const handlePrepareUpdate = async () => {
-        if (!canManageUpdate) {
-            setUpdateMsg({ type: 'error', text: '只有管理员可以执行更新' })
-            return
-        }
         setPreparingUpdate(true)
         setUpdateMsg(null)
         try {
@@ -209,10 +204,6 @@ export default function Layout() {
     }
 
     const handleRestartUpdate = async () => {
-        if (!canManageUpdate) {
-            setUpdateMsg({ type: 'error', text: '只有管理员可以执行更新' })
-            return
-        }
         setRestartingUpdate(true)
         setUpdateMsg(null)
         try {
@@ -576,13 +567,6 @@ export default function Layout() {
                         </Button>
                     )}
 
-                    {!canManageUpdate && (
-                        <Callout.Root color="amber" size="1" mt="3">
-                            <Callout.Icon><AlertCircle size={14} /></Callout.Icon>
-                            <Callout.Text>当前账号可以查看更新；准备更新和重启面板仅限管理员或所有者。</Callout.Text>
-                        </Callout.Root>
-                    )}
-
                     {updateInfo?.reason && (
                         <Callout.Root color="amber" size="1" mt="3">
                             <Callout.Icon><AlertCircle size={14} /></Callout.Icon>
@@ -613,11 +597,11 @@ export default function Layout() {
                             </Button>
                         </Dialog.Close>
                         {updateInfo?.prepared ? (
-                            <Button color="red" onClick={handleRestartUpdate} disabled={!canManageUpdate || restartingUpdate}>
+                            <Button color="red" onClick={handleRestartUpdate} disabled={restartingUpdate}>
                                 {restartingUpdate && <Spinner size="1" />} 现在重启面板
                             </Button>
                         ) : (
-                            <Button onClick={handlePrepareUpdate} disabled={!canManageUpdate || preparingUpdate || checkingUpdate || !updateInfo?.can_update}>
+                            <Button onClick={handlePrepareUpdate} disabled={preparingUpdate || checkingUpdate || !updateInfo?.can_update}>
                                 {preparingUpdate ? <Spinner size="1" /> : <DownloadCloud size={16} />} 立即更新
                             </Button>
                         )}

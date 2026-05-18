@@ -42,24 +42,11 @@ func (h *UserHandler) Create(c *gin.Context) {
 
 	role := req.Role
 	if role == "" {
-		role = "viewer"
+		role = auth.RoleAdmin
 	}
 	if !auth.ValidRoles[role] {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "role must be 'owner', 'admin', 'operator', or 'viewer'"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "role must be 'admin'"})
 		return
-	}
-	// Only owner can create owner users; owner/admin can create admin users.
-	callerRole, _ := c.Get("user_role")
-	if role == auth.RoleOwner {
-		if callerRole != auth.RoleOwner {
-			c.JSON(http.StatusForbidden, gin.H{"error": "only owner can create owner-level users"})
-			return
-		}
-	} else if role == auth.RoleAdmin {
-		if callerRole != auth.RoleOwner && callerRole != auth.RoleAdmin {
-			c.JSON(http.StatusForbidden, gin.H{"error": "only owner/admin can create admin-level users"})
-			return
-		}
 	}
 
 	var count int64
@@ -114,21 +101,9 @@ func (h *UserHandler) Update(c *gin.Context) {
 		return
 	}
 
-	// Protect owner accounts: only owner can modify ANY field of an owner user.
-	callerRole, _ := c.Get("user_role")
-	if user.Role == auth.RoleOwner && callerRole != auth.RoleOwner {
-		c.JSON(http.StatusForbidden, gin.H{"error": "only owner can modify an owner account"})
-		return
-	}
-
 	if req.Role != "" {
 		if !auth.ValidRoles[req.Role] {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "role must be 'owner', 'admin', 'operator', or 'viewer'"})
-			return
-		}
-		// Only owner can assign owner role.
-		if req.Role == auth.RoleOwner && callerRole != auth.RoleOwner {
-			c.JSON(http.StatusForbidden, gin.H{"error": "only owner can assign owner role"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "role must be 'admin'"})
 			return
 		}
 		user.Role = req.Role
@@ -158,7 +133,7 @@ func (h *UserHandler) Update(c *gin.Context) {
 	c.JSON(http.StatusOK, user)
 }
 
-// Delete removes a user (cannot delete self, only owner can delete owner)
+// Delete removes a user (cannot delete self)
 func (h *UserHandler) Delete(c *gin.Context) {
 	id, _ := strconv.ParseUint(c.Param("id"), 10, 32)
 
@@ -173,15 +148,6 @@ func (h *UserHandler) Delete(c *gin.Context) {
 	if err := h.db.First(&user, id).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
 		return
-	}
-
-	// Only owner can delete owner accounts.
-	if user.Role == auth.RoleOwner {
-		callerRole, _ := c.Get("user_role")
-		if callerRole != auth.RoleOwner {
-			c.JSON(http.StatusForbidden, gin.H{"error": "only owner can delete an owner account"})
-			return
-		}
 	}
 
 	h.db.Delete(&user)

@@ -8,8 +8,8 @@ import (
 type User struct {
 	ID        uint      `gorm:"primaryKey" json:"id"`
 	Username  string    `gorm:"uniqueIndex;not null;size:64" json:"username"`
-	Password  string    `gorm:"not null" json:"-"`                          // bcrypt hash, never exposed in JSON
-	Role      string    `gorm:"not null;size:16;default:admin" json:"role"` // owner, admin, operator, viewer
+	Password  string    `gorm:"not null" json:"-"` // bcrypt hash, never exposed in JSON
+	Role      string    `gorm:"not null;size:16;default:admin" json:"role"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }

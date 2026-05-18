@@ -110,6 +110,7 @@ func (h *AuthHandler) Setup(c *gin.Context) {
 		"user": gin.H{
 			"id":       user.ID,
 			"username": user.Username,
+			"role":     user.Role,
 		},
 	})
 }
@@ -148,6 +149,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		"user": gin.H{
 			"id":       user.ID,
 			"username": user.Username,
+			"role":     user.Role,
 		},
 	})
 }
@@ -156,10 +158,18 @@ func (h *AuthHandler) Login(c *gin.Context) {
 func (h *AuthHandler) Me(c *gin.Context) {
 	userID, _ := c.Get("user_id")
 	username, _ := c.Get("username")
+	role := "admin"
+	if id, ok := userID.(uint); ok {
+		var user model.User
+		if err := h.db.Select("role").First(&user, id).Error; err == nil && user.Role != "" {
+			role = user.Role
+		}
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"id":       userID,
 		"username": username,
+		"role":     role,
 	})
 }
 
@@ -224,6 +234,7 @@ func (h *AuthHandler) UpdateAdminProfile(c *gin.Context) {
 		"user": gin.H{
 			"id":       user.ID,
 			"username": req.Username,
+			"role":     user.Role,
 		},
 	})
 }

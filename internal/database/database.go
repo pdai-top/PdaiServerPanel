@@ -71,23 +71,13 @@ func Init(dbPath string) *gorm.DB {
 	db.Where("key = ?", "panel_autostart").FirstOrCreate(&model.Setting{Key: "panel_autostart", Value: "false"})
 	db.Where("key = ?", "startup_script").FirstOrCreate(&model.Setting{Key: "startup_script", Value: ""})
 
-	// RBAC migration: promote first admin to owner if no owner exists yet.
-	var ownerCount int64
-	db.Model(&model.User{}).Where("role = ?", "owner").Count(&ownerCount)
-	if ownerCount == 0 {
-		// Select the exact user ID first, then update by PK (safe across all SQL dialects).
-		var firstAdmin model.User
-		if db.Where("role = ?", "admin").Order("id ASC").First(&firstAdmin).Error == nil {
-			db.Model(&model.User{}).Where("id = ?", firstAdmin.ID).Update("role", "owner")
-			log.Printf("RBAC migration: promoted user '%s' (ID %d) to owner", firstAdmin.Username, firstAdmin.ID)
-		} else {
-			// No admin users either — promote the very first user regardless of role.
-			var firstUser model.User
-			if db.Order("id ASC").First(&firstUser).Error == nil {
-				db.Model(&model.User{}).Where("id = ?", firstUser.ID).Update("role", "owner")
-				log.Printf("RBAC migration: promoted user '%s' (ID %d) to owner (no admin found)", firstUser.Username, firstUser.ID)
-			}
-		}
+	// Role cleanup: older builds promoted the first administrator to "owner".
+	// The panel now uses "admin" as the only full-control role.
+	if tx := db.Model(&model.User{}).Where("role = ?", "owner").Update("role", "admin"); tx.Error == nil && tx.RowsAffected > 0 {
+		log.Printf("RBAC migration: converted %d owner user(s) to admin", tx.RowsAffected)
+	}
+	if tx := db.Model(&model.User{}).Where("role <> ?", "admin").Update("role", "admin"); tx.Error == nil && tx.RowsAffected > 0 {
+		log.Printf("RBAC migration: converted %d non-admin user(s) to admin", tx.RowsAffected)
 	}
 
 	log.Println("Database initialized successfully")

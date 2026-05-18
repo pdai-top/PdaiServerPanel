@@ -24,8 +24,8 @@ type Manager struct {
 
 	db             *gorm.DB
 	router         *gin.RouterGroup // /api/plugins (protected, any role)
-	operatorRouter *gin.RouterGroup // /api/plugins (operator/admin/owner)
-	adminRouter    *gin.RouterGroup // /api/plugins (admin/owner only)
+	operatorRouter *gin.RouterGroup // /api/plugins (admin)
+	adminRouter    *gin.RouterGroup // /api/plugins (admin only)
 	publicRouter   *gin.RouterGroup // /api/plugins (public, no JWT)
 	eventBus       *EventBus
 	coreAPI        CoreAPI
