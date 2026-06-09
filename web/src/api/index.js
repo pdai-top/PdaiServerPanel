@@ -303,7 +303,7 @@ export const databaseAPI = {
     postgresTuningPresets: () => api.get('/plugins/database/presets/postgres-tuning'),
 
     listInstances: () => api.get('/plugins/database/instances'),
-    getInstance: (id) => api.get(`/plugins/database/instances/${id}`),
+    getInstance: (id, params) => api.get(`/plugins/database/instances/${id}`, { params }),
     createInstance: (data) => api.post('/plugins/database/instances', data),
     deleteInstance: (id) => api.delete(`/plugins/database/instances/${id}`),
     startInstance: (id) => api.post(`/plugins/database/instances/${id}/start`),

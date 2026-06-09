@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { Box, Flex, Grid, Card, Button, IconButton, Text, Heading, Badge, Dialog, TextField, Select, Switch, Callout, Separator, Tooltip } from '@radix-ui/themes'
-import { Database, Plus, Play, FileText, Link, Trash2, RefreshCw, AlertCircle, CheckCircle2, Sparkles, ChevronDown, ChevronRight } from 'lucide-react'
+import { Database, Plus, Play, FileText, Link, Trash2, RefreshCw, AlertCircle, CheckCircle2, Sparkles, ChevronDown, ChevronRight, Archive } from 'lucide-react'
 import { databaseAPI, dockerAPI } from '../api/index.js'
 import { useTranslation } from 'react-i18next'
 import { useNavigate } from 'react-router'
@@ -523,6 +523,15 @@ export default function DatabaseInstances() {
                                             onClick={(e) => { e.stopPropagation(); navigate(`/database/${inst.id}?tab=connection`) }}
                                         >
                                             <Link size={14} />
+                                        </IconButton>
+                                    </Tooltip>
+                                    <Tooltip content={t('backup.title')}>
+                                        <IconButton
+                                            size="2"
+                                            variant="soft"
+                                            onClick={(e) => { e.stopPropagation(); navigate(`/database/${inst.id}?tab=backups`) }}
+                                        >
+                                            <Archive size={14} />
                                         </IconButton>
                                     </Tooltip>
                                     <Tooltip content={t('common.delete')}>

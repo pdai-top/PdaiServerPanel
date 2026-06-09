@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"gorm.io/gorm"
@@ -42,19 +43,25 @@ func (s *Service) ListInstances() ([]Instance, error) {
 	if err := s.db.Order("id ASC").Find(&instances).Error; err != nil {
 		return nil, err
 	}
-	for i := range instances {
-		instances[i].Status = s.resolveInstanceStatus(&instances[i])
-	}
+	s.resolveInstanceStatuses(instances)
 	return instances, nil
 }
 
 // GetInstance returns a single instance with live status.
 func (s *Service) GetInstance(id uint) (*Instance, error) {
+	inst, err := s.getInstanceRecord(id)
+	if err != nil {
+		return nil, err
+	}
+	inst.Status = s.resolveInstanceStatus(inst)
+	return inst, nil
+}
+
+func (s *Service) getInstanceRecord(id uint) (*Instance, error) {
 	var inst Instance
 	if err := s.db.First(&inst, id).Error; err != nil {
 		return nil, err
 	}
-	inst.Status = s.resolveInstanceStatus(&inst)
 	return &inst, nil
 }
 
@@ -561,7 +568,7 @@ func (s *Service) TestConnection(id uint) error {
 
 // ListBackups returns local backup files recorded for an instance.
 func (s *Service) ListBackups(instanceID uint) ([]DatabaseBackup, error) {
-	if _, err := s.GetInstance(instanceID); err != nil {
+	if _, err := s.getInstanceRecord(instanceID); err != nil {
 		return nil, err
 	}
 	var backups []DatabaseBackup
@@ -1314,12 +1321,27 @@ func findEngine(engine EngineType) *EngineInfo {
 }
 
 // resolveInstanceStatus checks Docker for actual container state.
+func (s *Service) resolveInstanceStatuses(instances []Instance) {
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 8)
+	for i := range instances {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			instances[idx].Status = s.resolveInstanceStatus(&instances[idx])
+		}(i)
+	}
+	wg.Wait()
+}
+
 func (s *Service) resolveInstanceStatus(inst *Instance) string {
 	if inst.IsRemote() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		if err := NewDBClient().Ping(ctx, inst); err != nil {
-			return "stopped"
+			return "error"
 		}
 		return "running"
 	}

@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	mysqldriver "github.com/go-sql-driver/mysql" // MySQL driver
 	_ "github.com/lib/pq"                        // PostgreSQL driver
@@ -21,40 +22,45 @@ func NewDBClient() *DBClient {
 	return &DBClient{}
 }
 
+const defaultDBConnectTimeout = 5 * time.Second
+
 // connectMySQL connects to a MySQL or MariaDB instance.
 func (c *DBClient) connectMySQL(inst *Instance) (*sql.DB, error) {
+	return c.connectMySQLWithTimeout(inst, defaultDBConnectTimeout)
+}
+
+func (c *DBClient) connectMySQLWithTimeout(inst *Instance, timeout time.Duration) (*sql.DB, error) {
 	// Use mysql.Config to safely build DSN with any special characters in password.
 	cfg := mysqldriver.NewConfig()
 	cfg.User = inst.DBUsername()
 	cfg.Passwd = inst.RootPassword
 	cfg.Net = "tcp"
 	cfg.Addr = inst.DBAddr()
+	if timeout > 0 {
+		cfg.Timeout = timeout
+	}
 	dsn := cfg.FormatDSN()
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		return nil, err
-	}
-	if err := db.Ping(); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("ping failed: %w", err)
 	}
 	return db, nil
 }
 
 // connectPostgres connects to a PostgreSQL instance.
 func (c *DBClient) connectPostgres(inst *Instance) (*sql.DB, error) {
+	return c.connectPostgresWithTimeout(inst, defaultDBConnectTimeout)
+}
+
+func (c *DBClient) connectPostgresWithTimeout(inst *Instance, timeout time.Duration) (*sql.DB, error) {
 	// Quote password with single quotes; escape backslashes first, then quotes (libpq convention).
 	escapedPwd := strings.ReplaceAll(inst.RootPassword, `\`, `\\`)
 	escapedPwd = strings.ReplaceAll(escapedPwd, "'", `\'`)
-	dsn := fmt.Sprintf("host=%s port=%d user=%s password='%s' sslmode=%s",
-		inst.DBHost(), inst.Port, inst.DBUsername(), escapedPwd, inst.DBSSLMode())
+	dsn := fmt.Sprintf("host=%s port=%d user=%s password='%s' sslmode=%s connect_timeout=%d",
+		inst.DBHost(), inst.Port, inst.DBUsername(), escapedPwd, inst.DBSSLMode(), connectTimeoutSeconds(timeout))
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		return nil, err
-	}
-	if err := db.Ping(); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("ping failed: %w", err)
 	}
 	return db, nil
 }
@@ -100,16 +106,20 @@ func (inst *Instance) DBSSLMode() string {
 }
 
 func (c *DBClient) Ping(ctx context.Context, inst *Instance) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	timeout := dbConnectTimeoutFromContext(ctx, defaultDBConnectTimeout)
 	switch inst.Engine {
 	case EngineMySQL, EngineMariaDB:
-		db, err := c.connectMySQL(inst)
+		db, err := c.connectMySQLWithTimeout(inst, timeout)
 		if err != nil {
 			return err
 		}
 		defer db.Close()
 		return db.PingContext(ctx)
 	case EnginePostgres:
-		db, err := c.connectPostgres(inst)
+		db, err := c.connectPostgresWithTimeout(inst, timeout)
 		if err != nil {
 			return err
 		}
@@ -122,6 +132,26 @@ func (c *DBClient) Ping(ctx context.Context, inst *Instance) error {
 	default:
 		return fmt.Errorf("unsupported engine: %s", inst.Engine)
 	}
+}
+
+func dbConnectTimeoutFromContext(ctx context.Context, fallback time.Duration) time.Duration {
+	if deadline, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(deadline); remaining > 0 && remaining < fallback {
+			return remaining
+		}
+	}
+	return fallback
+}
+
+func connectTimeoutSeconds(timeout time.Duration) int {
+	if timeout <= 0 {
+		return int(defaultDBConnectTimeout / time.Second)
+	}
+	seconds := int((timeout + time.Second - time.Nanosecond) / time.Second)
+	if seconds < 1 {
+		return 1
+	}
+	return seconds
 }
 
 // ── Database operations ──

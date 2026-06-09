@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
@@ -62,12 +63,26 @@ func (h *Handler) GetInstance(c *gin.Context) {
 	if err != nil {
 		return
 	}
-	inst, err := h.svc.GetInstance(id)
+	var inst *Instance
+	if isFalseQueryValue(c.DefaultQuery("live", "true")) {
+		inst, err = h.svc.getInstanceRecord(id)
+	} else {
+		inst, err = h.svc.GetInstance(id)
+	}
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Instance not found"})
 		return
 	}
 	c.JSON(http.StatusOK, inst)
+}
+
+func isFalseQueryValue(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "0", "false", "no", "off":
+		return true
+	default:
+		return false
+	}
 }
 
 // CreateInstance creates a new database instance.

@@ -15,6 +15,7 @@ import { useTranslation } from 'react-i18next'
 
 const engineColors = { mysql: 'blue', postgres: 'indigo', mariadb: 'teal', redis: 'red' }
 const statusColors = { running: 'green', stopped: 'gray', error: 'red', creating: 'orange' }
+const validTabs = new Set(['databases', 'users', 'connection', 'query', 'backups', 'logs'])
 
 const mysqlCharsets = ['utf8mb4', 'utf8', 'latin1']
 const pgCharsets = ['UTF8', 'LATIN1']
@@ -23,6 +24,14 @@ export default function DatabaseDetail() {
     const { t } = useTranslation()
     const navigate = useNavigate()
     const { id } = useParams()
+    const initialTab = (() => {
+        try {
+            const tab = new URLSearchParams(window.location.search).get('tab')
+            return validTabs.has(tab) ? tab : 'databases'
+        } catch {
+            return 'databases'
+        }
+    })()
 
     // Core state
     const [instance, setInstance] = useState(null)
@@ -56,7 +65,7 @@ export default function DatabaseDetail() {
     const [actionLoading, setActionLoading] = useState(false)
 
     // Active tab
-    const [activeTab, setActiveTab] = useState('databases')
+    const [activeTab, setActiveTab] = useState(initialTab)
 
     // Query state
     const [queryText, setQueryText] = useState('')
@@ -69,14 +78,15 @@ export default function DatabaseDetail() {
 
     const fetchInstance = useCallback(async () => {
         try {
-            const res = await databaseAPI.getInstance(id)
+            const live = activeTab === 'backups' ? 'false' : undefined
+            const res = await databaseAPI.getInstance(id, live ? { live } : undefined)
             setInstance(res.data)
         } catch (e) {
             console.error(e)
         } finally {
             setLoading(false)
         }
-    }, [id])
+    }, [id, activeTab])
 
     const fetchDatabases = useCallback(async () => {
         try {
@@ -126,10 +136,12 @@ export default function DatabaseDetail() {
     // Initial load
     useEffect(() => {
         fetchInstance()
-        fetchDatabases()
-        fetchUsers()
+        if (activeTab !== 'backups') {
+            fetchDatabases()
+            fetchUsers()
+        }
         fetchBackups()
-    }, [fetchInstance, fetchDatabases, fetchUsers, fetchBackups])
+    }, [activeTab, fetchInstance, fetchDatabases, fetchUsers, fetchBackups])
 
     // Fetch connection info when tab changes
     useEffect(() => {
