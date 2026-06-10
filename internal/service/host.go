@@ -72,49 +72,183 @@ func (s *HostService) Get(id uint) (*model.Host, error) {
 
 // Create creates a new host and applies the configuration
 func (s *HostService) Create(req *model.HostCreateRequest) (*model.Host, error) {
-	domains, err := hostDomainsFromRequest(req)
-	if err != nil {
-		return nil, fmt.Errorf("invalid domain: %w", err)
-	}
-	req.Domain = domains[0]
-	if err := checkDomainConflicts(s.db, nil, domains); err != nil {
+	var created model.Host
+	var domains []string
+	if err := s.db.Transaction(func(tx *gorm.DB) error {
+		var err error
+		domains, err = hostDomainsFromRequest(req)
+		if err != nil {
+			return fmt.Errorf("invalid domain: %w", err)
+		}
+		req.Domain = domains[0]
+
+		// If the user is combining multiple standalone hosts into one multi-address
+		// host, take over those single-domain hosts so the new combined site can be
+		// created without a manual delete/rename step.
+		if len(domains) > 1 {
+			if err := adoptStandaloneDomainHosts(tx, nil, domains); err != nil {
+				return err
+			}
+		}
+		if err := checkDomainConflicts(tx, nil, domains); err != nil {
+			return err
+		}
+
+		// Validate custom directives
+		if err := caddy.SanitizeCustomDirectives(req.CustomDirectives); err != nil {
+			return fmt.Errorf("invalid custom directives: %w", err)
+		}
+		if err := caddy.ValidateFullCaddyBlockForDomains(domains, req.FullCaddyBlock); err != nil {
+			return fmt.Errorf("invalid full Caddy block: %w", err)
+		}
+
+		// Validate all string fields that get embedded in Caddyfile
+		for label, val := range map[string]string{
+			"redirect_url":    req.RedirectURL,
+			"root_path":       req.RootPath,
+			"error_page_path": req.ErrorPagePath,
+			"php_fastcgi":     req.PHPFastCGI,
+			"index_files":     req.IndexFiles,
+			"cors_origins":    req.CorsOrigins,
+			"cors_methods":    req.CorsMethods,
+			"cors_headers":    req.CorsHeaders,
+		} {
+			if err := caddy.ValidateCaddyValue(label, val); err != nil {
+				return err
+			}
+		}
+		for _, h := range req.CustomHeaders {
+			if err := caddy.ValidateCaddyValue("header name", h.Name); err != nil {
+				return err
+			}
+			if err := caddy.ValidateCaddyValue("header value", h.Value); err != nil {
+				return err
+			}
+		}
+
+		hostType := stringOrDefault(req.HostType, "proxy")
+		if hostType != "proxy" && hostType != "redirect" && hostType != "static" && hostType != "php" {
+			return fmt.Errorf("invalid host_type: %s (must be 'proxy', 'redirect', 'static', or 'php')", hostType)
+		}
+
+		applyDefaultSitePaths(req, s.cfg.DataDir)
+
+		// Validate based on type
+		switch hostType {
+		case "redirect":
+			if req.RedirectURL == "" {
+				return fmt.Errorf("redirect_url is required for redirect hosts")
+			}
+		case "proxy":
+			if len(req.Upstreams) == 0 {
+				return fmt.Errorf("at least one upstream is required for proxy hosts")
+			}
+		case "static":
+			if req.RootPath == "" {
+				return fmt.Errorf("root_path is required for static hosts")
+			}
+		case "php":
+			if req.RootPath == "" {
+				return fmt.Errorf("root_path is required for PHP hosts")
+			}
+		}
+
+		host := &model.Host{
+			Domain:           req.Domain,
+			HostType:         hostType,
+			Enabled:          boolPtr(boolOrDefault(req.Enabled, true)),
+			TLSEnabled:       boolPtr(boolOrDefault(req.TLSEnabled, true)),
+			HTTPRedirect:     boolPtr(boolOrDefault(req.HTTPRedirect, false)),
+			WebSocket:        boolPtr(boolOrDefault(req.WebSocket, false)),
+			RedirectURL:      req.RedirectURL,
+			RedirectCode:     intOrDefault(req.RedirectCode, 301),
+			Compression:      boolPtr(boolOrDefault(req.Compression, false)),
+			CacheEnabled:     boolPtr(boolOrDefault(req.CacheEnabled, false)),
+			CacheTTL:         intOrDefault(req.CacheTTL, 300),
+			CorsEnabled:      boolPtr(boolOrDefault(req.CorsEnabled, false)),
+			CorsOrigins:      req.CorsOrigins,
+			CorsMethods:      req.CorsMethods,
+			CorsHeaders:      req.CorsHeaders,
+			SecurityHeaders:  boolPtr(boolOrDefault(req.SecurityHeaders, false)),
+			ErrorPagePath:    req.ErrorPagePath,
+			RootPath:         req.RootPath,
+			DirectoryBrowse:  boolPtr(boolOrDefault(req.DirectoryBrowse, false)),
+			PHPFastCGI:       req.PHPFastCGI,
+			IndexFiles:       req.IndexFiles,
+			TLSMode:          stringOrDefault(req.TLSMode, "auto"),
+			DnsProviderID:    uintPtrOrNil(req.DnsProviderID),
+			CustomDirectives: req.CustomDirectives,
+			FullCaddyBlock:   strings.TrimSpace(req.FullCaddyBlock),
+			GroupID:          uintPtrOrNil(req.GroupID),
+		}
+
+		host.Domains = buildHostDomainRows(0, domains[1:])
+
+		for i, u := range req.Upstreams {
+			weight := u.Weight
+			if weight < 1 {
+				weight = 1
+			}
+			host.Upstreams = append(host.Upstreams, model.Upstream{
+				Address:   u.Address,
+				Weight:    weight,
+				SortOrder: i,
+			})
+		}
+
+		for i, h := range req.CustomHeaders {
+			host.CustomHeaders = append(host.CustomHeaders, model.CustomHeader{
+				Direction: stringOrDefault(h.Direction, "response"),
+				Operation: stringOrDefault(h.Operation, "set"),
+				Name:      h.Name,
+				Value:     h.Value,
+				SortOrder: i,
+			})
+		}
+
+		for i, a := range req.AccessRules {
+			host.AccessRules = append(host.AccessRules, model.AccessRule{
+				RuleType:  a.RuleType,
+				IPRange:   a.IPRange,
+				SortOrder: i,
+			})
+		}
+
+		// Hash basic auth passwords
+		for _, ba := range req.BasicAuths {
+			if err := caddy.ValidateCaddyValue("basicauth username", ba.Username); err != nil {
+				return err
+			}
+			hash, err := bcrypt.GenerateFromPassword([]byte(ba.Password), bcrypt.DefaultCost)
+			if err != nil {
+				return fmt.Errorf("failed to hash password for user '%s': %w", ba.Username, err)
+			}
+			host.BasicAuths = append(host.BasicAuths, model.BasicAuth{
+				Username:     ba.Username,
+				PasswordHash: string(hash),
+			})
+		}
+
+		if err := tx.Create(host).Error; err != nil {
+			return fmt.Errorf("failed to create host: %w", err)
+		}
+		created = *host
+
+		// Sync tag associations
+		if len(req.TagIDs) > 0 {
+			for _, tagID := range req.TagIDs {
+				if err := tx.Create(&model.HostTag{HostID: host.ID, TagID: tagID}).Error; err != nil {
+					return err
+				}
+			}
+		}
+
+		return nil
+	}); err != nil {
 		return nil, err
 	}
 
-	// Validate custom directives
-	if err := caddy.SanitizeCustomDirectives(req.CustomDirectives); err != nil {
-		return nil, fmt.Errorf("invalid custom directives: %w", err)
-	}
-	if err := caddy.ValidateFullCaddyBlockForDomains(domains, req.FullCaddyBlock); err != nil {
-		return nil, fmt.Errorf("invalid full Caddy block: %w", err)
-	}
-
-	// Validate all string fields that get embedded in Caddyfile
-	for label, val := range map[string]string{
-		"redirect_url":    req.RedirectURL,
-		"root_path":       req.RootPath,
-		"error_page_path": req.ErrorPagePath,
-		"php_fastcgi":     req.PHPFastCGI,
-		"index_files":     req.IndexFiles,
-		"cors_origins":    req.CorsOrigins,
-		"cors_methods":    req.CorsMethods,
-		"cors_headers":    req.CorsHeaders,
-	} {
-		if err := caddy.ValidateCaddyValue(label, val); err != nil {
-			return nil, err
-		}
-	}
-	for _, h := range req.CustomHeaders {
-		if err := caddy.ValidateCaddyValue("header name", h.Name); err != nil {
-			return nil, err
-		}
-		if err := caddy.ValidateCaddyValue("header value", h.Value); err != nil {
-			return nil, err
-		}
-	}
-
 	// Optional DNS pre-validation: warn if domain doesn't resolve to this server.
-	// Runs in a goroutine to avoid blocking the request on slow DNS lookups.
 	var dnsVerify model.Setting
 	if s.db.Where("key = ?", "dns_verify_on_create").First(&dnsVerify).Error == nil && dnsVerify.Value == "true" {
 		go func(domain string) {
@@ -126,125 +260,11 @@ func (s *HostService) Create(req *model.HostCreateRequest) (*model.Host, error) 
 		}(req.Domain)
 	}
 
-	hostType := stringOrDefault(req.HostType, "proxy")
-	if hostType != "proxy" && hostType != "redirect" && hostType != "static" && hostType != "php" {
-		return nil, fmt.Errorf("invalid host_type: %s (must be 'proxy', 'redirect', 'static', or 'php')", hostType)
-	}
-
-	applyDefaultSitePaths(req, s.cfg.DataDir)
-
-	// Validate based on type
-	switch hostType {
-	case "redirect":
-		if req.RedirectURL == "" {
-			return nil, fmt.Errorf("redirect_url is required for redirect hosts")
-		}
-	case "proxy":
-		if len(req.Upstreams) == 0 {
-			return nil, fmt.Errorf("at least one upstream is required for proxy hosts")
-		}
-	case "static":
-		if req.RootPath == "" {
-			return nil, fmt.Errorf("root_path is required for static hosts")
-		}
-	case "php":
-		if req.RootPath == "" {
-			return nil, fmt.Errorf("root_path is required for PHP hosts")
-		}
-	}
-
-	host := &model.Host{
-		Domain:           req.Domain,
-		HostType:         hostType,
-		Enabled:          boolPtr(boolOrDefault(req.Enabled, true)),
-		TLSEnabled:       boolPtr(boolOrDefault(req.TLSEnabled, true)),
-		HTTPRedirect:     boolPtr(boolOrDefault(req.HTTPRedirect, false)),
-		WebSocket:        boolPtr(boolOrDefault(req.WebSocket, false)),
-		RedirectURL:      req.RedirectURL,
-		RedirectCode:     intOrDefault(req.RedirectCode, 301),
-		Compression:      boolPtr(boolOrDefault(req.Compression, false)),
-		CacheEnabled:     boolPtr(boolOrDefault(req.CacheEnabled, false)),
-		CacheTTL:         intOrDefault(req.CacheTTL, 300),
-		CorsEnabled:      boolPtr(boolOrDefault(req.CorsEnabled, false)),
-		CorsOrigins:      req.CorsOrigins,
-		CorsMethods:      req.CorsMethods,
-		CorsHeaders:      req.CorsHeaders,
-		SecurityHeaders:  boolPtr(boolOrDefault(req.SecurityHeaders, false)),
-		ErrorPagePath:    req.ErrorPagePath,
-		RootPath:         req.RootPath,
-		DirectoryBrowse:  boolPtr(boolOrDefault(req.DirectoryBrowse, false)),
-		PHPFastCGI:       req.PHPFastCGI,
-		IndexFiles:       req.IndexFiles,
-		TLSMode:          stringOrDefault(req.TLSMode, "auto"),
-		DnsProviderID:    uintPtrOrNil(req.DnsProviderID),
-		CustomDirectives: req.CustomDirectives,
-		FullCaddyBlock:   strings.TrimSpace(req.FullCaddyBlock),
-		GroupID:          uintPtrOrNil(req.GroupID),
-	}
-
-	host.Domains = buildHostDomainRows(0, domains[1:])
-
-	for i, u := range req.Upstreams {
-		weight := u.Weight
-		if weight < 1 {
-			weight = 1
-		}
-		host.Upstreams = append(host.Upstreams, model.Upstream{
-			Address:   u.Address,
-			Weight:    weight,
-			SortOrder: i,
-		})
-	}
-
-	for i, h := range req.CustomHeaders {
-		host.CustomHeaders = append(host.CustomHeaders, model.CustomHeader{
-			Direction: stringOrDefault(h.Direction, "response"),
-			Operation: stringOrDefault(h.Operation, "set"),
-			Name:      h.Name,
-			Value:     h.Value,
-			SortOrder: i,
-		})
-	}
-
-	for i, a := range req.AccessRules {
-		host.AccessRules = append(host.AccessRules, model.AccessRule{
-			RuleType:  a.RuleType,
-			IPRange:   a.IPRange,
-			SortOrder: i,
-		})
-	}
-
-	// Hash basic auth passwords
-	for _, ba := range req.BasicAuths {
-		if err := caddy.ValidateCaddyValue("basicauth username", ba.Username); err != nil {
-			return nil, err
-		}
-		hash, err := bcrypt.GenerateFromPassword([]byte(ba.Password), bcrypt.DefaultCost)
-		if err != nil {
-			return nil, fmt.Errorf("failed to hash password for user '%s': %w", ba.Username, err)
-		}
-		host.BasicAuths = append(host.BasicAuths, model.BasicAuth{
-			Username:     ba.Username,
-			PasswordHash: string(hash),
-		})
-	}
-
-	if err := s.db.Create(host).Error; err != nil {
-		return nil, fmt.Errorf("failed to create host: %w", err)
-	}
-
-	// Sync tag associations
-	if len(req.TagIDs) > 0 {
-		for _, tagID := range req.TagIDs {
-			s.db.Create(&model.HostTag{HostID: host.ID, TagID: tagID})
-		}
-	}
-
 	if err := s.ApplyConfig(); err != nil {
 		return nil, fmt.Errorf("host created but Caddy config failed: %w", err)
 	}
 
-	return s.Get(host.ID)
+	return s.Get(created.ID)
 }
 
 func applyDefaultSitePaths(req *model.HostCreateRequest, dataDir string) {
@@ -1085,6 +1105,45 @@ func checkDomainConflicts(db *gorm.DB, hostID *uint, domains []string) error {
 		}
 		if count > 0 {
 			return fmt.Errorf("domain '%s' already exists", domain)
+		}
+	}
+	return nil
+}
+
+func adoptStandaloneDomainHosts(db *gorm.DB, hostID *uint, domains []string) error {
+	if len(domains) <= 1 {
+		return nil
+	}
+	lower := make([]string, 0, len(domains))
+	for _, domain := range domains {
+		if domain = strings.ToLower(strings.TrimSpace(domain)); domain != "" {
+			lower = append(lower, domain)
+		}
+	}
+	if len(lower) <= 1 {
+		return nil
+	}
+
+	var conflicts []model.Host
+	if err := db.Preload("Domains").Where("LOWER(domain) IN ?", lower).Find(&conflicts).Error; err != nil {
+		return err
+	}
+
+	for _, h := range conflicts {
+		if hostID != nil && h.ID == *hostID {
+			continue
+		}
+		if len(h.Domains) > 0 {
+			return fmt.Errorf("domain '%s' already exists", h.Domain)
+		}
+	}
+
+	for _, h := range conflicts {
+		if hostID != nil && h.ID == *hostID {
+			continue
+		}
+		if err := db.Delete(&model.Host{}, h.ID).Error; err != nil {
+			return err
 		}
 	}
 	return nil
