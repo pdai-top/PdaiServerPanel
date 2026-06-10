@@ -363,11 +363,8 @@ func ExtractSiteAddresses(content string) map[string]struct{} {
 		if header == "" {
 			continue
 		}
-		for _, raw := range strings.Split(header, ",") {
-			raw = strings.TrimSpace(raw)
-			if raw == "" {
-				continue
-			}
+		header = strings.NewReplacer(",", " ").Replace(header)
+		for _, raw := range strings.Fields(header) {
 			exact, _, _, err := normalizeDomainAddress(raw)
 			if err != nil {
 				continue
