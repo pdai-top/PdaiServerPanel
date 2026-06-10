@@ -227,6 +227,7 @@ function HostFormDialog({ open, onClose, onSaved, host }) {
 
     useEffect(() => {
         if (host) {
+            const existingFullBlock = host.full_caddy_block || ''
             const nextForm = {
                 domain: hostDomainListFromForm({
                     domain: host.domain,
@@ -248,7 +249,7 @@ function HostFormDialog({ open, onClose, onSaved, host }) {
                 access_rules: host.access_rules || [],
                 basic_auths: [], // never pre-fill passwords
                 custom_directives: host.custom_directives || '',
-                full_caddy_block: '',
+                full_caddy_block: existingFullBlock || '',
                 compression: host.compression || false,
                 cors_enabled: host.cors_enabled || false,
                 cors_origins: host.cors_origins || '*',
@@ -261,9 +262,8 @@ function HostFormDialog({ open, onClose, onSaved, host }) {
                 tls_mode: host.tls_mode || 'auto',
                 dns_provider_id: host.dns_provider_id || null,
             }
-            nextForm.full_caddy_block = buildCaddyBlockFromForm(nextForm)
             setForm(nextForm)
-            setFullCaddyAutoSync(true)
+            setFullCaddyAutoSync(!existingFullBlock.trim())
         } else {
             const nextForm = { ...DEFAULT_FORM }
             nextForm.full_caddy_block = buildCaddyBlockFromForm(nextForm)
@@ -301,7 +301,7 @@ function HostFormDialog({ open, onClose, onSaved, host }) {
             const primaryDomain = parsedDomains[0] || domain.trim()
             const payload = {
                 ...rest,
-                full_caddy_block: fullCaddyAutoSync ? '' : rest.full_caddy_block,
+                full_caddy_block: fullCaddyAutoSync ? '' : (rest.full_caddy_block || '').trim(),
                 domain: primaryDomain,
                 domains: parsedDomains.filter((item) => item.toLowerCase() !== primaryDomain.toLowerCase()),
                 upstreams: form.host_type === 'proxy'
