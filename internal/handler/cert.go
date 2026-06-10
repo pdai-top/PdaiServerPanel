@@ -10,6 +10,7 @@ import (
 	"strconv"
 
 	"github.com/gin-gonic/gin"
+	"github.com/pdai/pdai/internal/caddy"
 	"github.com/pdai/pdai/internal/config"
 	"github.com/pdai/pdai/internal/service"
 )
@@ -52,7 +53,7 @@ func (h *CertHandler) Upload(c *gin.Context) {
 	}
 
 	// Create cert directory for this domain
-	certDir := filepath.Join(h.cfg.DataDir, "certs", host.Domain)
+	certDir := filepath.Join(h.cfg.DataDir, "certs", caddy.SafeDomainFileName(host.Domain))
 	if err := os.MkdirAll(certDir, 0700); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to create cert directory: %v", err)})
 		return
@@ -104,7 +105,7 @@ func (h *CertHandler) Delete(c *gin.Context) {
 	}
 
 	// Remove cert directory
-	certDir := filepath.Join(h.cfg.DataDir, "certs", host.Domain)
+	certDir := filepath.Join(h.cfg.DataDir, "certs", caddy.SafeDomainFileName(host.Domain))
 	os.RemoveAll(certDir)
 
 	// Clear cert paths

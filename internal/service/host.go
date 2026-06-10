@@ -119,7 +119,7 @@ func (s *HostService) Create(req *model.HostCreateRequest) (*model.Host, error) 
 	if s.db.Where("key = ?", "dns_verify_on_create").First(&dnsVerify).Error == nil && dnsVerify.Value == "true" {
 		go func(domain string) {
 			dnsChecker := NewDnsCheckService(s.db)
-			dnsResult, _ := dnsChecker.Check(domain)
+			dnsResult, _ := dnsChecker.Check(caddy.DomainHost(domain))
 			if dnsResult != nil && dnsResult.Status == "mismatched" {
 				log.Printf("DNS warning: domain '%s' does not resolve to this server (records: %v)", domain, dnsResult.ARecords)
 			}
@@ -251,7 +251,7 @@ func applyDefaultSitePaths(req *model.HostCreateRequest, dataDir string) {
 	if req == nil || req.Domain == "" {
 		return
 	}
-	siteBase := filepath.Join(dataDir, "www", req.Domain)
+	siteBase := filepath.Join(dataDir, "www", caddy.SafeDomainFileName(req.Domain))
 	if req.RootPath == "" {
 		req.RootPath = filepath.Join(siteBase, "index")
 	}

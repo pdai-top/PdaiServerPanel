@@ -3,20 +3,15 @@ package appstore
 import (
 	"fmt"
 	"log/slog"
-	"regexp"
 
+	"github.com/pdai/pdai/internal/caddy"
 	pluginpkg "github.com/pdai/pdai/internal/plugin"
 	"gorm.io/gorm"
 )
 
-var domainRe = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)+$`)
-
 func validateTemplateDomain(domain string) error {
-	if len(domain) > 253 {
-		return fmt.Errorf("domain too long (max 253 chars)")
-	}
-	if !domainRe.MatchString(domain) {
-		return fmt.Errorf("invalid domain format: %s", domain)
+	if err := caddy.ValidateDomain(domain); err != nil {
+		return fmt.Errorf("invalid domain: %w", err)
 	}
 	return nil
 }

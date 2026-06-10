@@ -619,7 +619,7 @@ func (s *Service) CreateSite(req *CreateSiteRequest, progressCb func(string)) (*
 
 	rootPath := req.RootPath
 	if rootPath == "" {
-		rootPath = filepath.Join(s.dataDir, "www", req.Domain)
+		rootPath = filepath.Join(s.dataDir, "www", caddy.SafeDomainFileName(req.Domain))
 	}
 
 	// Validate root path.

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -15,7 +16,11 @@ func ValidateDomain(domain string) error {
 	if domain == "" {
 		return fmt.Errorf("domain cannot be empty")
 	}
-	if len(domain) > 253 {
+	hostPart, port, hasPort := splitDomainPort(domain)
+	if len(domain) > 255 {
+		return fmt.Errorf("domain too long (max 255 chars including optional port)")
+	}
+	if len(hostPart) > 253 {
 		return fmt.Errorf("domain too long (max 253 chars)")
 	}
 	// Reject characters that could break Caddyfile syntax
@@ -25,7 +30,96 @@ func ValidateDomain(domain string) error {
 	if !domainRegex.MatchString(domain) {
 		return fmt.Errorf("invalid domain format: %s", domain)
 	}
+	if hasPort {
+		portNum, err := strconv.Atoi(port)
+		if err != nil || portNum < 1 || portNum > 65535 {
+			return fmt.Errorf("invalid port number: %s", port)
+		}
+	}
 	return nil
+}
+
+func splitDomainPort(domain string) (host, port string, hasPort bool) {
+	idx := strings.LastIndex(domain, ":")
+	if idx < 0 || idx == len(domain)-1 {
+		return domain, "", false
+	}
+	port = domain[idx+1:]
+	for _, ch := range port {
+		if ch < '0' || ch > '9' {
+			return domain, "", false
+		}
+	}
+	return domain[:idx], port, true
+}
+
+func normalizeDomainAddress(address string) (exact, host string, hasPort bool, err error) {
+	address = strings.ToLower(strings.TrimSpace(address))
+	if strings.HasPrefix(address, "http://") {
+		address = strings.TrimPrefix(address, "http://")
+	} else if strings.HasPrefix(address, "https://") {
+		address = strings.TrimPrefix(address, "https://")
+	}
+	if err := ValidateDomain(address); err != nil {
+		return "", "", false, err
+	}
+	host, _, hasPort = splitDomainPort(address)
+	if !hasPort {
+		host = address
+	}
+	return address, host, hasPort, nil
+}
+
+// DomainHost returns the hostname part of a domain/address, removing an optional
+// scheme and port. It is intended for DNS lookups, where "example.com:8080"
+// must be resolved as "example.com".
+func DomainHost(domain string) string {
+	domain = strings.TrimSpace(domain)
+	if strings.HasPrefix(domain, "http://") {
+		domain = strings.TrimPrefix(domain, "http://")
+	} else if strings.HasPrefix(domain, "https://") {
+		domain = strings.TrimPrefix(domain, "https://")
+	}
+	host, _, hasPort := splitDomainPort(domain)
+	if hasPort {
+		return host
+	}
+	return domain
+}
+
+// SafeDomainFileName converts a validated domain/address into a filesystem-safe
+// path segment for logs, cert directories and generated site roots. Normal
+// domains are unchanged; wildcard/port characters are replaced with underscores.
+func SafeDomainFileName(domain string) string {
+	domain = strings.TrimSpace(domain)
+	if domain == "" {
+		return "site"
+	}
+	var b strings.Builder
+	b.Grow(len(domain))
+	for _, ch := range domain {
+		switch {
+		case ch >= 'a' && ch <= 'z',
+			ch >= 'A' && ch <= 'Z',
+			ch >= '0' && ch <= '9',
+			ch == '.', ch == '-', ch == '_':
+			b.WriteRune(ch)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	name := b.String()
+	if name == "" {
+		name = "site"
+	}
+	if len(name) > 180 {
+		name = name[:180]
+		name = strings.TrimRight(name, ".")
+		if name == "" {
+			name = "site"
+		}
+	}
+	return name
 }
 
 // ValidateUpstream checks if an upstream address is safe for Caddyfile injection.
@@ -164,20 +258,25 @@ func ValidateFullCaddyBlockForDomains(domains []string, block string) error {
 	if block == "" {
 		return nil
 	}
-	allowed := make(map[string]bool, len(domains))
+	allowedExact := make(map[string]bool, len(domains))
+	allowedHostWithoutPort := make(map[string]bool, len(domains))
 	primary := ""
 	for _, domain := range domains {
 		domain = strings.ToLower(strings.TrimSpace(domain))
 		if domain == "" {
 			continue
 		}
-		if err := ValidateDomain(domain); err != nil {
+		exact, hostOnly, hasPort, err := normalizeDomainAddress(domain)
+		if err != nil {
 			return err
 		}
 		if primary == "" {
-			primary = domain
+			primary = exact
 		}
-		allowed[domain] = true
+		allowedExact[exact] = true
+		if !hasPort {
+			allowedHostWithoutPort[hostOnly] = true
+		}
 	}
 	if primary == "" {
 		return fmt.Errorf("domain cannot be empty")
@@ -198,24 +297,16 @@ func ValidateFullCaddyBlockForDomains(domains []string, block string) error {
 	}
 	for _, address := range addresses {
 		address = strings.TrimSpace(address)
-		if strings.HasPrefix(address, "http://") {
-			address = strings.TrimPrefix(address, "http://")
-		} else if strings.HasPrefix(address, "https://") {
-			address = strings.TrimPrefix(address, "https://")
-		}
 		if address == "" {
 			return fmt.Errorf("full Caddy block contains an empty site address")
 		}
 
-		addressDomain := address
-		if host, _, err := net.SplitHostPort(address); err == nil {
-			addressDomain = strings.Trim(host, "[]")
-		} else if idx := strings.LastIndex(address, ":"); idx > -1 && !strings.Contains(address[idx+1:], "]") {
-			addressDomain = address[:idx]
+		exact, hostOnly, hasPort, err := normalizeDomainAddress(address)
+		if err != nil {
+			return fmt.Errorf("invalid full Caddy block site address '%s': %w", address, err)
 		}
-		addressDomain = strings.ToLower(strings.TrimSpace(addressDomain))
-		if !allowed[addressDomain] {
-			return fmt.Errorf("full Caddy block domain '%s' must match one of the host domains", addressDomain)
+		if !allowedExact[exact] && !(hasPort && allowedHostWithoutPort[hostOnly]) {
+			return fmt.Errorf("full Caddy block domain '%s' must match one of the host domains", exact)
 		}
 	}
 

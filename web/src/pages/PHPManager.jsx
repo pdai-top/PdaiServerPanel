@@ -5,6 +5,19 @@ import { phpAPI, dockerAPI } from '../api/index.js'
 import { useTranslation } from 'react-i18next'
 
 const DEFAULT_SITE_ROOT = './data/www'
+
+const safeDomainFileName = (domain) => {
+    const value = String(domain || '').trim()
+    if (!value) return 'site'
+    let safe = value
+        .replace(/[^a-zA-Z0-9._-]/g, '_')
+    if (!safe) safe = 'site'
+    if (safe.length > 180) {
+        safe = safe.slice(0, 180).replace(/\.+$/g, '')
+        if (!safe) safe = 'site'
+    }
+    return safe || 'site'
+}
 import DockerRequired from '../components/DockerRequired.jsx'
 
 const statusColors = { running: 'green', stopped: 'gray', error: 'red', creating: 'orange' }
@@ -205,7 +218,7 @@ export default function PHPManager() {
     const handleCreateSite = () => {
         const url = phpAPI.createSiteStreamUrl()
         const body = { ...siteForm }
-        if (!body.root_path) body.root_path = `${DEFAULT_SITE_ROOT}/${body.domain}`
+        if (!body.root_path) body.root_path = `${DEFAULT_SITE_ROOT}/${safeDomainFileName(body.domain)}`
         if (body.runtime_type === 'fpm' && body.runtime_id === 0) {
             const matching = runtimes.find(r => r.version === body.php_version && r.type === 'fpm')
             if (matching) body.runtime_id = matching.id
@@ -561,7 +574,7 @@ export default function PHPManager() {
                         </Box>
                         <Box>
                             <Text size="2" weight="bold" mb="1">{t('php.domain')}</Text>
-                            <TextField.Root value={siteForm.domain} onChange={e => setSiteForm(p => ({ ...p, domain: e.target.value, root_path: `${DEFAULT_SITE_ROOT}/${e.target.value}` }))} placeholder="example.com" />
+                            <TextField.Root value={siteForm.domain} onChange={e => setSiteForm(p => ({ ...p, domain: e.target.value, root_path: `${DEFAULT_SITE_ROOT}/${safeDomainFileName(e.target.value)}` }))} placeholder="example.com 或 example.com:8080" />
                         </Box>
                         <Box>
                             <Text size="2" weight="bold" mb="1">{t('php.runtime_type')}</Text>

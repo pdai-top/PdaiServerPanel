@@ -80,8 +80,21 @@ const DEFAULT_FORM = {
 
 const DEFAULT_DATA_DIR = './data'
 
-const defaultSiteRootPath = (domain) => `${DEFAULT_DATA_DIR}/www/${domain || 'example.com'}/index`
-const defaultErrorPagePath = (domain) => `${DEFAULT_DATA_DIR}/www/${domain || 'example.com'}/default`
+const safeDomainFileName = (domain) => {
+    const value = String(domain || '').trim()
+    if (!value) return 'site'
+    let safe = value
+        .replace(/[^a-zA-Z0-9._-]/g, '_')
+    if (!safe) safe = 'site'
+    if (safe.length > 180) {
+        safe = safe.slice(0, 180).replace(/\.+$/g, '')
+        if (!safe) safe = 'site'
+    }
+    return safe || 'site'
+}
+
+const defaultSiteRootPath = (domain) => `${DEFAULT_DATA_DIR}/www/${safeDomainFileName(domain || 'example.com')}/index`
+const defaultErrorPagePath = (domain) => `${DEFAULT_DATA_DIR}/www/${safeDomainFileName(domain || 'example.com')}/default`
 
 const buildCaddyBlockFromForm = (source) => {
     const domains = hostDomainListFromForm(source)
@@ -173,7 +186,7 @@ const buildCaddyBlockFromForm = (source) => {
 
     lines.push(
         '    log {',
-        `        output file ./data/logs/access-${domain}.log {`,
+        `        output file ./data/logs/access-${safeDomainFileName(domain)}.log {`,
         '            roll_size 50MiB',
         '            roll_keep 3',
         '        }',

@@ -3,6 +3,7 @@ package service
 import (
 	"net"
 
+	"github.com/pdai/pdai/internal/caddy"
 	"github.com/pdai/pdai/internal/model"
 	"gorm.io/gorm"
 )
@@ -23,6 +24,7 @@ type DnsLookupFunc func(domain string) (aRecords []string, aaaaRecords []string,
 
 // DefaultDnsLookup performs real DNS lookups using net.LookupIP.
 func DefaultDnsLookup(domain string) ([]string, []string, error) {
+	domain = caddy.DomainHost(domain)
 	ips, err := net.LookupIP(domain)
 	if err != nil {
 		return nil, nil, err

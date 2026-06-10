@@ -81,7 +81,7 @@ func renderHostBlock(b *strings.Builder, host model.Host, cfg *config.Config, dn
 		}
 	}
 
-	b.WriteString(fmt.Sprintf("%s {\n", strings.Join(domains, ", ")))
+	b.WriteString(fmt.Sprintf("%s {\n", strings.Join(domains, " ")))
 
 	// TLS configuration based on mode
 	switch tlsMode {
@@ -149,8 +149,10 @@ func renderHostBlock(b *strings.Builder, host model.Host, cfg *config.Config, dn
 		renderErrorPages(b, host.ErrorPagePath)
 	}
 
-	// Per-host access log
-	b.WriteString(fmt.Sprintf("\tlog {\n\t\toutput file %s/access-%s.log {\n\t\t\troll_size 50MiB\n\t\t\troll_keep 3\n\t\t}\n\t}\n", cfg.LogDir, host.Domain))
+	// Per-host access log. Use a filesystem-safe filename because valid Caddy
+	// site addresses may include characters like ":" for ports or "*" for
+	// wildcards.
+	b.WriteString(fmt.Sprintf("\tlog {\n\t\toutput file %s/access-%s.log {\n\t\t\troll_size 50MiB\n\t\t\troll_keep 3\n\t\t}\n\t}\n", cfg.LogDir, SafeDomainFileName(host.Domain)))
 
 	b.WriteString("}\n\n")
 }
