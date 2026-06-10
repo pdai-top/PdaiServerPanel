@@ -82,13 +82,11 @@ func (s *HostService) Create(req *model.HostCreateRequest) (*model.Host, error) 
 		}
 		req.Domain = domains[0]
 
-		// If the user is combining multiple standalone hosts into one multi-address
-		// host, take over those single-domain hosts so the new combined site can be
-		// created without a manual delete/rename step.
-		if len(domains) > 1 {
-			if err := adoptStandaloneDomainHosts(tx, nil, domains); err != nil {
-				return err
-			}
+		// If any requested domain is already attached elsewhere, take over that
+		// exact address so users can merge standalone sites or rehome an existing
+		// additional domain into a new multi-address site.
+		if err := claimRequestedDomains(tx, nil, domains); err != nil {
+			return err
 		}
 		if err := checkDomainConflicts(tx, nil, domains); err != nil {
 			return err
@@ -292,6 +290,9 @@ func (s *HostService) Update(id uint, req *model.HostCreateRequest) (*model.Host
 		return nil, fmt.Errorf("invalid domain: %w", err)
 	}
 	req.Domain = domains[0]
+	if err := claimRequestedDomains(s.db, &id, domains); err != nil {
+		return nil, err
+	}
 	if err := checkDomainConflicts(s.db, &id, domains); err != nil {
 		return nil, err
 	}
@@ -1110,42 +1111,125 @@ func checkDomainConflicts(db *gorm.DB, hostID *uint, domains []string) error {
 	return nil
 }
 
-func adoptStandaloneDomainHosts(db *gorm.DB, hostID *uint, domains []string) error {
-	if len(domains) <= 1 {
-		return nil
-	}
+func claimRequestedDomains(db *gorm.DB, hostID *uint, domains []string) error {
 	lower := make([]string, 0, len(domains))
 	for _, domain := range domains {
 		if domain = strings.ToLower(strings.TrimSpace(domain)); domain != "" {
 			lower = append(lower, domain)
 		}
 	}
-	if len(lower) <= 1 {
+	if len(lower) == 0 {
 		return nil
 	}
 
-	var conflicts []model.Host
-	if err := db.Preload("Domains").Where("LOWER(domain) IN ?", lower).Find(&conflicts).Error; err != nil {
+	ownerIDs := map[uint]struct{}{}
+
+	var primaryOwners []model.Host
+	if err := db.Preload("Domains").Where("LOWER(domain) IN ?", lower).Find(&primaryOwners).Error; err != nil {
+		return err
+	}
+	for _, h := range primaryOwners {
+		if hostID != nil && h.ID == *hostID {
+			continue
+		}
+		ownerIDs[h.ID] = struct{}{}
+	}
+
+	var secondaryOwnerIDs []uint
+	if err := db.Model(&model.HostDomain{}).Distinct("host_id").Where("LOWER(domain) IN ?", lower).Pluck("host_id", &secondaryOwnerIDs).Error; err != nil {
+		return err
+	}
+	for _, id := range secondaryOwnerIDs {
+		if hostID != nil && id == *hostID {
+			continue
+		}
+		ownerIDs[id] = struct{}{}
+	}
+
+	if len(ownerIDs) == 0 {
+		return nil
+	}
+
+	ids := make([]uint, 0, len(ownerIDs))
+	for id := range ownerIDs {
+		ids = append(ids, id)
+	}
+
+	var ownedHosts []model.Host
+	if err := db.Preload("Domains", func(tx *gorm.DB) *gorm.DB { return tx.Order("sort_order ASC") }).
+		Where("id IN ?", ids).Find(&ownedHosts).Error; err != nil {
 		return err
 	}
 
-	for _, h := range conflicts {
-		if hostID != nil && h.ID == *hostID {
-			continue
-		}
-		if len(h.Domains) > 0 {
-			return fmt.Errorf("domain '%s' already exists", h.Domain)
-		}
+	lowerSet := make(map[string]struct{}, len(lower))
+	for _, d := range lower {
+		lowerSet[d] = struct{}{}
 	}
 
-	for _, h := range conflicts {
+	for i := range ownedHosts {
+		h := &ownedHosts[i]
 		if hostID != nil && h.ID == *hostID {
 			continue
 		}
-		if err := db.Delete(&model.Host{}, h.ID).Error; err != nil {
+
+		owns := false
+		for _, d := range lower {
+			if strings.EqualFold(h.Domain, d) {
+				owns = true
+				break
+			}
+		}
+		for _, d := range h.Domains {
+			if _, ok := lowerSet[strings.ToLower(strings.TrimSpace(d.Domain))]; ok {
+				owns = true
+				break
+			}
+		}
+		if !owns {
+			continue
+		}
+
+		remaining := make([]model.HostDomain, 0, len(h.Domains))
+		removedPrimary := false
+		for _, d := range h.Domains {
+			key := strings.ToLower(strings.TrimSpace(d.Domain))
+			if _, ok := lowerSet[key]; ok {
+				continue
+			}
+			remaining = append(remaining, d)
+		}
+
+		for _, d := range lower {
+			if strings.EqualFold(h.Domain, d) {
+				removedPrimary = true
+				break
+			}
+		}
+
+		if removedPrimary {
+			if len(remaining) == 0 {
+				if err := db.Delete(&model.Host{}, h.ID).Error; err != nil {
+					return err
+				}
+				continue
+			}
+
+			newPrimary := remaining[0]
+			if err := db.Where("host_id = ? AND LOWER(domain) = ?", h.ID, strings.ToLower(strings.TrimSpace(newPrimary.Domain))).
+				Delete(&model.HostDomain{}).Error; err != nil {
+				return err
+			}
+			if err := db.Model(&model.Host{}).Where("id = ?", h.ID).Update("domain", newPrimary.Domain).Error; err != nil {
+				return err
+			}
+			remaining = remaining[1:]
+		}
+
+		if err := db.Where("host_id = ? AND LOWER(domain) IN ?", h.ID, lower).Delete(&model.HostDomain{}).Error; err != nil {
 			return err
 		}
 	}
+
 	return nil
 }
 
