@@ -345,3 +345,35 @@ func ValidateFullCaddyBlockForDomains(domains []string, block string) error {
 	}
 	return nil
 }
+
+// ExtractSiteAddresses scans a Caddyfile and returns the site addresses found
+// in top-level site blocks. Addresses are normalized to lowercase and stripped
+// of http(s):// prefixes.
+func ExtractSiteAddresses(content string) map[string]struct{} {
+	addrs := make(map[string]struct{})
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") || trimmed == "{" {
+			continue
+		}
+		if !strings.HasSuffix(trimmed, "{") {
+			continue
+		}
+		header := strings.TrimSpace(strings.TrimSuffix(trimmed, "{"))
+		if header == "" {
+			continue
+		}
+		for _, raw := range strings.Split(header, ",") {
+			raw = strings.TrimSpace(raw)
+			if raw == "" {
+				continue
+			}
+			exact, _, _, err := normalizeDomainAddress(raw)
+			if err != nil {
+				continue
+			}
+			addrs[strings.ToLower(exact)] = struct{}{}
+		}
+	}
+	return addrs
+}

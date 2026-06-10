@@ -74,6 +74,9 @@ func (s *HostService) Get(id uint) (*model.Host, error) {
 func (s *HostService) Create(req *model.HostCreateRequest) (*model.Host, error) {
 	var created model.Host
 	var domains []string
+	if err := s.CleanupDomainsFromCaddyfile(); err != nil {
+		return nil, fmt.Errorf("failed to clean stale domains: %w", err)
+	}
 	if err := s.db.Transaction(func(tx *gorm.DB) error {
 		var err error
 		domains, err = hostDomainsFromRequest(req)
@@ -290,6 +293,9 @@ func (s *HostService) Update(id uint, req *model.HostCreateRequest) (*model.Host
 		return nil, fmt.Errorf("invalid domain: %w", err)
 	}
 	req.Domain = domains[0]
+	if err := s.CleanupDomainsFromCaddyfile(); err != nil {
+		return nil, fmt.Errorf("failed to clean stale domains: %w", err)
+	}
 	if err := claimRequestedDomains(s.db, &id, domains); err != nil {
 		return nil, err
 	}
@@ -670,6 +676,87 @@ func (s *HostService) ApplyConfig() error {
 	}
 
 	return nil
+}
+
+// CleanupDomainsFromCaddyfile treats the current Caddyfile as the canonical
+// source for site addresses and removes stale host/domain rows that no longer
+// appear there. This is used to clear old SQLite data that would otherwise keep
+// blocking new host creations.
+func (s *HostService) CleanupDomainsFromCaddyfile() error {
+	content, err := s.caddyMgr.GetCaddyfileContent()
+	if err != nil {
+		return nil
+	}
+	siteAddrs := caddy.ExtractSiteAddresses(content)
+	if len(siteAddrs) == 0 {
+		return nil
+	}
+
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		var hosts []model.Host
+		if err := tx.Preload("Domains", func(db *gorm.DB) *gorm.DB { return db.Order("sort_order ASC") }).
+			Find(&hosts).Error; err != nil {
+			return err
+		}
+
+		for _, host := range hosts {
+			primaryKey := strings.ToLower(strings.TrimSpace(host.Domain))
+			primaryInCaddy := false
+			primaryInData := false
+			for addr := range siteAddrs {
+				if addr == primaryKey {
+					primaryInCaddy = true
+					primaryInData = true
+					break
+				}
+			}
+
+			remaining := make([]model.HostDomain, 0, len(host.Domains))
+			promote := ""
+			for _, d := range host.Domains {
+				key := strings.ToLower(strings.TrimSpace(d.Domain))
+				if key == "" {
+					continue
+				}
+				if _, ok := siteAddrs[key]; ok {
+					remaining = append(remaining, d)
+					if promote == "" {
+						promote = key
+					}
+					continue
+				}
+			}
+
+			// Delete stale secondary domains not represented in the current Caddyfile.
+			if err := tx.Where("host_id = ? AND LOWER(domain) NOT IN ?", host.ID, keysOfStringSet(siteAddrs)).
+				Delete(&model.HostDomain{}).Error; err != nil {
+				return err
+			}
+
+			// If the primary domain no longer exists in Caddyfile, try to promote a
+			// surviving domain. Otherwise remove the whole host record.
+			if !primaryInCaddy {
+				if promote != "" {
+					if err := tx.Model(&model.Host{}).Where("id = ?", host.ID).Update("domain", promote).Error; err != nil {
+						return err
+					}
+					continue
+				}
+				if err := tx.Delete(&model.Host{}, host.ID).Error; err != nil {
+					return err
+				}
+				continue
+			}
+
+			// Keep the host row in sync if its primary domain exists but the
+			// database had accidental duplicate domain rows.
+			if !primaryInData {
+				// No-op placeholder to keep the branch explicit for future
+				// adjustments; the cleanup above already removed stale rows.
+			}
+		}
+		return nil
+	})
 }
 
 // UpdateCertPaths updates the custom certificate paths for a host
@@ -1239,6 +1326,14 @@ func buildHostDomainRows(hostID uint, domains []string) []model.HostDomain {
 		rows = append(rows, model.HostDomain{HostID: hostID, Domain: domain, SortOrder: i})
 	}
 	return rows
+}
+
+func keysOfStringSet(set map[string]struct{}) []string {
+	keys := make([]string, 0, len(set))
+	for k := range set {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 // GenerateWildcardDomain creates a subdomain under the configured wildcard domain.
